@@ -1,0 +1,55 @@
+# Claude Code policy pack - the P1 launch target.
+# Facts sourced from agentbox-design/AGENT-MATRIX.md (deep-verified 2026-07).
+# This file is DATA, not code (criterion P4): no executable hooks.
+agent: claude-code
+scope: local
+type: cli-headless
+
+run:
+  command: claude
+  headlessFlags: ["-p"]
+  # Quiet the box down: no auto-update, no non-essential traffic. Auth is injected
+  # separately by the secret broker (see auth.envVar), never baked into the image.
+  containerEnv:
+    DISABLE_AUTOUPDATER: "1"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+egress:
+  # model/auth endpoints - allow (criterion E7)
+  model:
+    - api.anthropic.com
+    - claude.ai
+    - platform.claude.com
+  # infra: installer/updater + package registry the agent legitimately needs
+  infra:
+    - downloads.claude.ai
+    - registry.npmjs.org
+  # telemetry: denied by default. Claude Code works fine without these.
+  telemetry_deny:
+    - statsig.anthropic.com
+    - statsig.com
+    - sentry.io
+
+auth:
+  # Claude Code Linux uses a plaintext creds file with no keyring dependency,
+  # and accepts a ~1yr OAuth token via env - cleanest bridging of any agent.
+  method: env-token
+  envVar: CLAUDE_CODE_OAUTH_TOKEN
+  deviceFlow: false
+
+paths:
+  relocateEnv: CLAUDE_CONFIG_DIR
+  # Deny-read hotspots (criterion S5) - belt-and-suspenders on top of absence.
+  credentialHotspots:
+    - "~/.claude/.credentials.json"
+
+mcp:
+  configPath: "~/.claude.json"
+  # Never auto-trust a repo-provided .mcp.json (criterion P5).
+  consentPolicy: outside-repo
+
+nativeSandbox:
+  # Claude Code has its own /sandbox, but inside our box WE own isolation.
+  # Disabling avoids nested-sandbox failure modes; the box is the boundary.
+  mode: disable
+  disableFlag: ""
