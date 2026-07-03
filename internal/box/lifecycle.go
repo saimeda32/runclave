@@ -33,6 +33,11 @@ type Step struct {
 	Argv  []string
 	InBox bool              // true -> run inside the box via `docker exec`
 	Env   map[string]string // in-box env injected as `docker exec -e K=V`
+	// PassEnv names variables passed to the box by NAME only (`docker exec -e NAME`),
+	// with no value on the argv. docker reads the value from runclave's own process
+	// environment. This keeps secrets (e.g. an auth token) off the argv, so they do
+	// not appear in host `ps`, and out of a rendered/dry-run plan.
+	PassEnv []string
 }
 
 // Plan is the full ordered lifecycle.
@@ -230,11 +235,19 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	if brokerSock != "" {
 		brokerNote = "broker socket " + brokerDst
 	}
+	// The agent auth token (if any) is passed BY NAME only, so its value never lands
+	// on the argv (host `ps`) or in a rendered plan. docker exec reads the value from
+	// runclave's own environment. This is the interim path; the broker replaces it.
+	var passEnv []string
+	if pack.Auth.EnvVar != "" {
+		passEnv = append(passEnv, pack.Auth.EnvVar)
+	}
 	steps = append(steps, Step{
-		Desc:  fmt.Sprintf("exec agent (egress->%s; %s)", proxyAddr, brokerNote),
-		Argv:  execArgv,
-		InBox: true,
-		Env:   env,
+		Desc:    fmt.Sprintf("exec agent (egress->%s; %s)", proxyAddr, brokerNote),
+		Argv:    execArgv,
+		InBox:   true,
+		Env:     env,
+		PassEnv: passEnv,
 	})
 	return Plan{Name: name, Net: net, GatewayName: gwName, OutboundNet: outNet, BrokerSock: brokerSock, Allowlist: pack.AllowedDomains(), Steps: steps}, nil
 }
@@ -540,6 +553,11 @@ func (p Plan) Execute(r Runner) error {
 			wrap := []string{"docker", "exec"}
 			for k, v := range s.Env {
 				wrap = append(wrap, "-e", k+"="+v)
+			}
+			// Pass-through secrets: name only, no value on the argv. docker reads
+			// the value from this process's environment when it runs the exec.
+			for _, name := range s.PassEnv {
+				wrap = append(wrap, "-e", name)
 			}
 			wrap = append(wrap, p.Name)
 			argv = append(wrap, s.Argv...)

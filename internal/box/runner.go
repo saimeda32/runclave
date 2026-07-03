@@ -14,6 +14,9 @@ func (ExecRunner) Run(argv []string) (string, error) {
 	if len(argv) == 0 {
 		return "", nil
 	}
+	// cmd.Env is left nil so the child inherits runclave's environment. That is what
+	// lets `docker exec -e NAME` (Step.PassEnv) read a secret's value from here
+	// without the value ever appearing on an argv.
 	cmd := exec.Command(argv[0], argv[1:]...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err

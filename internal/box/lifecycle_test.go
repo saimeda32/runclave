@@ -390,3 +390,57 @@ func TestExecuteWrapsAndSequences(t *testing.T) {
 		}
 	}
 }
+
+// A secret auth token is passed to the box BY NAME only. Its value must never
+// appear on an argv or in a rendered plan (host `ps` / --dry-run leak). The value
+// is supplied by runclave's own environment at exec time, not by the plan.
+func TestAuthTokenPassedByNameNotValue(t *testing.T) {
+	pack := testPack()
+	pack.Auth.EnvVar = "CLAUDE_CODE_OAUTH_TOKEN"
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The exec step must declare the token as pass-by-name, and must NOT stash the
+	// value in Env (which renders as -e K=V).
+	var exec Step
+	for _, s := range p.Steps {
+		if strings.HasPrefix(s.Desc, "exec agent") {
+			exec = s
+		}
+	}
+	found := false
+	for _, n := range exec.PassEnv {
+		if n == "CLAUDE_CODE_OAUTH_TOKEN" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("auth token must be in PassEnv, got %v", exec.PassEnv)
+	}
+	if _, ok := exec.Env["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
+		t.Fatal("auth token must NOT be in Env (that renders its value as -e K=V)")
+	}
+	// Render the whole plan the way --dry-run does; the token NAME may appear but a
+	// value assignment (NAME=...) must not.
+	r := &fakeRunner{}
+	if err := p.Execute(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.calls {
+		for _, tok := range c {
+			if strings.HasPrefix(tok, "CLAUDE_CODE_OAUTH_TOKEN=") {
+				t.Fatalf("token value leaked onto argv: %q", tok)
+			}
+		}
+	}
+	// The name-only form must be present on the exec step.
+	joined := ""
+	for _, c := range r.calls {
+		joined += strings.Join(c, " ") + "\n"
+	}
+	if !strings.Contains(joined, "-e CLAUDE_CODE_OAUTH_TOKEN ") && !strings.Contains(joined, "-e CLAUDE_CODE_OAUTH_TOKEN\n") {
+		t.Fatalf("expected name-only -e CLAUDE_CODE_OAUTH_TOKEN in rendered plan, got:\n%s", joined)
+	}
+}

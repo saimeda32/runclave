@@ -182,7 +182,7 @@ func cmdBackends(stdout, stderr io.Writer) int {
 // non-embedded (non-default-trusted) egress policy is never silently in effect.
 func warnIfLocalPacks(dir string, stderr io.Writer) {
 	if dir != "" {
-		fmt.Fprintf(stderr, "runclave: WARNING - using ON-DISK policy packs from %q (not the embedded trusted packs). Only do this with packs you trust; a repo-supplied pack can widen the egress allowlist.\n", dir)
+		fmt.Fprintf(stderr, "runclave: WARNING - using ON-DISK policy packs from %q (not the embedded trusted packs). Only do this with packs you trust: a repo-supplied pack can widen the egress allowlist AND name an arbitrary box image, which the host pulls over its own network (outside the sandbox) and runs as the box.\n", dir)
 	}
 }
 
@@ -319,19 +319,14 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	}
 	rawPol, _ := policy.RawBytes(dir, "claude-code")
 
-	// Interim auth: if the pack names an auth env var and the host has it set, pass
-	// it into the box so the agent can log in. This hands the raw token to the box
-	// via the exec environment, which is fine for now but is exactly what the
-	// credential broker is meant to replace with a short-lived, socket-brokered token.
-	if v := pol.Auth.EnvVar; v != "" {
-		if tok := os.Getenv(v); tok != "" {
-			if pol.Run.ContainerEnv == nil {
-				pol.Run.ContainerEnv = map[string]string{}
-			}
-			pol.Run.ContainerEnv[v] = tok
-		} else {
-			fmt.Fprintf(stderr, "runclave: note - %s is not set, the agent will not be logged in\n", v)
-		}
+	// Interim auth: if the pack names an auth env var, the exec step passes it to the
+	// box BY NAME (`docker exec -e NAME`), so docker reads the value from runclave's
+	// own environment at exec time. The token value is never placed on an argv or in
+	// a rendered plan, so it does not leak to host `ps` or a --dry-run print. It does
+	// still enter the box's process env for the agent to use; giving the box only a
+	// short-lived, socket-brokered token instead is what the credential broker adds.
+	if v := pol.Auth.EnvVar; v != "" && os.Getenv(v) == "" {
+		fmt.Fprintf(stderr, "runclave: note - %s is not set, the agent will not be logged in\n", v)
 	}
 
 	// Create the two-payload seed on the HOST in a temp dir (cleaned up after), and
@@ -381,7 +376,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		for _, line := range splitLines(dr.Rendered()) {
 			fmt.Fprintf(stdout, "    %s\n", line)
 		}
-		fmt.Fprintf(stdout, "  NOT YET WIRED: broker socket mount. Images are defined (docker/Dockerfile.{base,gateway}); run `make images` once before a real run.\n")
+		fmt.Fprintf(stdout, "  NOT YET WIRED: broker socket mount. Images are defined (docker/Dockerfile.{base,gateway,claude-code}); run `make images` once before a real run.\n")
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned")
 		return 0
 	}

@@ -11,7 +11,7 @@ vet:
 
 # Build the container images the lifecycle plan references. Run once before the
 # first real `runclave .` on a machine (the plan uses runclave/base + runclave/gateway).
-images: base-image gateway-image
+images: base-image gateway-image claude-image
 
 base-image:
 	docker build -f docker/Dockerfile.base -t runclave/base:latest .
