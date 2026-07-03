@@ -319,6 +319,21 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	}
 	rawPol, _ := policy.RawBytes(dir, "claude-code")
 
+	// Interim auth: if the pack names an auth env var and the host has it set, pass
+	// it into the box so the agent can log in. This hands the raw token to the box
+	// via the exec environment, which is fine for now but is exactly what the
+	// credential broker is meant to replace with a short-lived, socket-brokered token.
+	if v := pol.Auth.EnvVar; v != "" {
+		if tok := os.Getenv(v); tok != "" {
+			if pol.Run.ContainerEnv == nil {
+				pol.Run.ContainerEnv = map[string]string{}
+			}
+			pol.Run.ContainerEnv[v] = tok
+		} else {
+			fmt.Fprintf(stderr, "runclave: note - %s is not set, the agent will not be logged in\n", v)
+		}
+	}
+
 	// Create the two-payload seed on the HOST in a temp dir (cleaned up after), and
 	// thread the REAL artifact paths through the plan so `runclave .` is one command.
 	seedDir, err := os.MkdirTemp("", "runclave-seed-")
