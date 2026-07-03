@@ -31,9 +31,18 @@ type Session struct {
 	ID     string
 	Repo   string // the ONLY repo this session may obtain creds for, e.g. "github.com/owner/name"
 	Minter TokenMinter
-	// Anomalies records box-claimed host/path that didn't match Repo (logged, not trusted).
+	// Anomalies records box-claimed host/path that didn't match Repo (recorded, not
+	// trusted). Bounded (maxAnomalies) so a box spamming mismatches can't grow it
+	// without limit on the long-lived daemon.
 	Anomalies []string
+	// LogAnomaly, if set, is called the moment a mismatch is detected so the daemon
+	// surfaces it live (stderr/ledger) instead of it sitting in a slice no one reads.
+	// Set by the daemon; nil in unit tests.
+	LogAnomaly func(string)
 }
+
+// maxAnomalies caps the retained anomaly trail per session.
+const maxAnomalies = 1000
 
 // Request is a parsed git credential-helper request. Op is get|store|erase.
 type Request struct {
@@ -85,8 +94,13 @@ func (s *Session) Handle(req Request) (string, error) {
 			if shown == "" {
 				shown = "(no host supplied)"
 			}
-			s.Anomalies = append(s.Anomalies,
-				fmt.Sprintf("box asked for %q; minting for session repo %q", shown, s.Repo))
+			msg := fmt.Sprintf("box asked for %q; minting for session repo %q", shown, s.Repo)
+			if s.LogAnomaly != nil {
+				s.LogAnomaly(msg) // surface live, not just into a slice
+			}
+			if len(s.Anomalies) < maxAnomalies {
+				s.Anomalies = append(s.Anomalies, msg)
+			}
 		}
 		user, token, exp, err := s.Minter.Mint(s.Repo)
 		if err != nil {

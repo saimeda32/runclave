@@ -13,9 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/saimeda/runclave/internal/backend"
 	"github.com/saimeda/runclave/internal/box"
+	"github.com/saimeda/runclave/internal/broker"
 	"github.com/saimeda/runclave/internal/egress"
 	"github.com/saimeda/runclave/internal/ledger"
 	"github.com/saimeda/runclave/internal/policy"
@@ -32,6 +34,8 @@ Usage:
   runclave policy <agent>    validate and print an agent policy pack
   runclave export <src> [dst] pull a named artifact out of the box (never automatic)
   runclave destroy <box>     tear down a box (prompts to save /out)
+  runclave brokerd           host-side credential daemon: lends short-lived, repo-scoped git tokens to a box
+  runclave credential <op>   in-box git credential helper (talks to the broker; not run by hand)
 
 Flags:
   --backend <name>   force a backend (apple-container | docker); default: strongest available
@@ -67,6 +71,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdProxy(rest, stdout, stderr)
 	case "destroy":
 		return cmdDestroy(rest, stdout, stderr)
+	case "credential":
+		return cmdCredential(rest, stdout, stderr)
+	case "brokerd":
+		return cmdBrokerd(rest, stdout, stderr)
 	case "export":
 		fmt.Fprintf(stderr, "runclave: %q not yet implemented\n", cmd)
 		return 1
@@ -74,6 +82,125 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave: unknown command %q\n\n%s", cmd, usage)
 		return 2
 	}
+}
+
+// cmdCredential is the IN-BOX git credential helper. git invokes it as
+// `runclave credential <get|store|erase>` (configured via credential.helper).
+// It forwards the request to the host broker over $RUNCLAVE_BROKER_SOCK and
+// relays the short-lived answer. The box holds no long-lived secret: without the
+// socket it prints nothing and git falls back, which is the fail-closed default.
+func cmdCredential(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: runclave credential <get|store|erase>")
+		return 2
+	}
+	op := args[0]
+	sock := os.Getenv("RUNCLAVE_BROKER_SOCK")
+	if sock == "" {
+		// No broker wired: emit nothing. git treats an empty answer as "no
+		// credential" and moves on, rather than us inventing one.
+		return 0
+	}
+	if err := broker.Query(sock, op, os.Stdin, stdout); err != nil {
+		// A broker error must NOT surface a credential; stay silent so git falls
+		// back instead of proceeding with a half-answer.
+		fmt.Fprintf(stderr, "runclave credential: %v\n", err)
+		return 0
+	}
+	return 0
+}
+
+// cmdBrokerd is the HOST-SIDE credential daemon. It listens on a per-session unix
+// socket and answers git credential requests from inside the box with a
+// short-lived, repo-scoped GitHub App token. The App private key is read here on
+// the host, once, and never leaves; the box only ever sees the minted token.
+//
+// The socket path it binds is the same path handed to the box (mounted read-only
+// at a runclave-owned location), so authz stays host-side and per-session.
+func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("brokerd", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	socket := fs.String("socket", "", "unix socket path to listen on (per session)")
+	repo := fs.String("repo", "", "the ONLY repo this session may obtain creds for, e.g. github.com/owner/name")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *socket == "" || *repo == "" {
+		fmt.Fprintln(stderr, "usage: runclave brokerd --socket <path> --repo <host/owner/name>")
+		return 2
+	}
+	// Guard the path we are about to delete + bind. Require a .sock name, and if a
+	// file is already there, refuse unless it is itself a socket. This stops a
+	// mistyped --socket (e.g. a private key path) from being removed - the earlier
+	// "runclave-owned, only removes our own socket" claim was not actually enforced.
+	if !strings.HasSuffix(*socket, ".sock") {
+		fmt.Fprintln(stderr, "runclave brokerd: --socket must be a path ending in .sock")
+		return 2
+	}
+	minter, err := githubAppMinterFromEnv()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave brokerd: %v\n", err)
+		return 1
+	}
+	// Keep the socket's directory owner-only too, so the socket can't be reached
+	// (or a stale one swapped) by another local user via the parent dir.
+	if err := os.MkdirAll(filepath.Dir(*socket), 0o700); err != nil {
+		fmt.Fprintf(stderr, "runclave brokerd: socket dir: %v\n", err)
+		return 1
+	}
+	// Clear a stale socket from a crashed prior run so Listen can bind. Only remove
+	// it if what is there is actually a socket - never clobber a regular file.
+	if fi, statErr := os.Lstat(*socket); statErr == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			fmt.Fprintf(stderr, "runclave brokerd: refusing - %s exists and is not a socket\n", *socket)
+			return 1
+		}
+		_ = os.Remove(*socket)
+	}
+	// Create the socket 0600 ATOMICALLY: set a restrictive umask across Listen so
+	// there is no window where another local user can connect before a chmod. A
+	// post-hoc chmod leaves the socket world-reachable between bind and chmod.
+	oldMask := syscall.Umask(0o177)
+	l, err := net.Listen("unix", *socket)
+	syscall.Umask(oldMask)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave brokerd: listen: %v\n", err)
+		return 1
+	}
+	defer l.Close()
+	// Belt-and-suspenders: pin perms explicitly too (umask only clears bits).
+	_ = os.Chmod(*socket, 0o600)
+	sess := &broker.Session{ID: filepath.Base(*socket), Repo: *repo, Minter: minter}
+	// Surface repo mismatches live (a compromised box asking for a different repo)
+	// instead of letting them pile up unread in the session.
+	sess.LogAnomaly = func(m string) { fmt.Fprintf(stderr, "runclave brokerd: anomaly: %s\n", m) }
+	fmt.Fprintf(stdout, "runclave brokerd: serving %s for %s\n", *socket, *repo)
+	if err := broker.Serve(l, sess); err != nil {
+		fmt.Fprintf(stderr, "runclave brokerd: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// githubAppMinterFromEnv builds the production minter from the operator's
+// configuration. Fail-closed: any missing piece is an error, never a silent
+// fallback to a long-lived secret.
+func githubAppMinterFromEnv() (*broker.GitHubAppMinter, error) {
+	appID := os.Getenv("RUNCLAVE_GH_APP_ID")
+	instID := os.Getenv("RUNCLAVE_GH_INSTALLATION_ID")
+	keyPath := os.Getenv("RUNCLAVE_GH_PRIVATE_KEY")
+	if appID == "" || instID == "" || keyPath == "" {
+		return nil, fmt.Errorf("GitHub App not configured (set RUNCLAVE_GH_APP_ID, RUNCLAVE_GH_INSTALLATION_ID, RUNCLAVE_GH_PRIVATE_KEY)")
+	}
+	pem, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading private key: %w", err)
+	}
+	key, err := broker.ParseRSAKey(pem)
+	if err != nil {
+		return nil, err
+	}
+	return &broker.GitHubAppMinter{AppID: appID, InstallationID: instID, Key: key}, nil
 }
 
 // cmdFleet is the opt-in fleet layer: signed policy distribution,

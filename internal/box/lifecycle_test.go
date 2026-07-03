@@ -391,6 +391,38 @@ func TestExecuteWrapsAndSequences(t *testing.T) {
 	}
 }
 
+// When a broker socket is present, the plan points in-box git at the broker
+// credential helper (so a push fetches a short-lived token) and turns on
+// useHttpPath (so the broker can log any repo mismatch). Without a socket, no
+// such step exists.
+func TestBrokerWiresGitCredentialHelper(t *testing.T) {
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	withSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, s := range withSock.Steps {
+		joined += strings.Join(s.Argv, " ") + "\n"
+	}
+	if !strings.Contains(joined, "credential.helper !runclave credential") {
+		t.Fatalf("broker socket must wire the git credential helper, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "credential.useHttpPath true") {
+		t.Fatalf("broker socket must enable useHttpPath, got:\n%s", joined)
+	}
+	// No socket -> no credential-helper wiring.
+	noSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range noSock.Steps {
+		if strings.Contains(strings.Join(s.Argv, " "), "credential.helper") {
+			t.Fatal("no broker socket must mean no credential-helper step")
+		}
+	}
+}
+
 // A secret auth token is passed to the box BY NAME only. Its value must never
 // appear on an argv or in a rendered plan (host `ps` / --dry-run leak). The value
 // is supplied by runclave's own environment at exec time, not by the plan.

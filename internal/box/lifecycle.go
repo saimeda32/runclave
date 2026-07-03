@@ -216,6 +216,18 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	for _, w := range ws.Steps {
 		steps = append(steps, Step{Desc: "seed: " + w.Desc, Argv: w.Argv, InBox: true})
 	}
+	// If a broker socket is present, point in-box git at the broker credential
+	// helper so a push/pull fetches a short-lived token over the socket instead of
+	// carrying a long-lived secret in the box. useHttpPath makes git send host+path
+	// so the broker can log any repo mismatch (authz still uses the session repo).
+	if brokerSock != "" {
+		steps = append(steps,
+			Step{Desc: "broker: set git credential helper", InBox: true,
+				Argv: []string{"git", "config", "--global", "credential.helper", "!runclave credential"}},
+			Step{Desc: "broker: send http path for anomaly logging", InBox: true,
+				Argv: []string{"git", "config", "--global", "credential.useHttpPath", "true"}},
+		)
+	}
 	// Exec the agent, egress pointed at the proxy via env (the convenience layer;
 	// the ACTUAL chokepoint is the internal-net gateway). This is REAL now, not a
 	// Desc string: HTTP(S)_PROXY are injected into the exec env.
