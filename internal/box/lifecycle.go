@@ -176,9 +176,13 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// Box (workload): hardened, provisioned DIRECTLY on the internal net ONLY (no
 	// separate connect). If a broker socket is configured, mount ONLY that socket
 	// (read-only) so the in-box git credential helper can reach the host broker.
-	// The box runs the agent-agnostic base image (git + runclave binary). The
-	// specific agent CLI is installed on top per policy pack - a pending step.
-	boxArgv := setNetwork(drv.CreateArgs(name, "runclave/base:latest"), net)
+	// The box runs the pack's image (which builds FROM the base and adds the agent
+	// CLI). Packs without an image fall back to the agent-agnostic base.
+	boxImage := pack.Run.Image
+	if boxImage == "" {
+		boxImage = "runclave/base:latest"
+	}
+	boxArgv := setNetwork(drv.CreateArgs(name, boxImage), net)
 	if brokerSock != "" && len(boxArgv) >= 2 && boxArgv[0] == "docker" && boxArgv[1] == "run" {
 		boxArgv = append(boxArgv[:2], append([]string{"--mount", allowedBrokerMountSpec(brokerSock)}, boxArgv[2:]...)...)
 	}

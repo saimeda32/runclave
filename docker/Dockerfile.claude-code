@@ -1,0 +1,22 @@
+# Box image for the claude-code pack: the runclave base plus the Claude Code CLI.
+# The CLI is installed at build time, so the box does not need any network to set
+# itself up. At run time claude reaches api.anthropic.com through the gateway
+# proxy, which the claude-code pack already allows.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o /runclave ./cmd/runclave
+
+FROM node:20-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code \
+    && useradd -u 10001 -m runclave \
+    && mkdir -p /seed /run/runclave && chown 10001:10001 /seed /run/runclave
+COPY --from=build /runclave /usr/local/bin/runclave
+USER 10001
+WORKDIR /home/runclave
+CMD ["sleep", "infinity"]

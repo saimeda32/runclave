@@ -24,6 +24,10 @@ type Pack struct {
 		Command       string            `yaml:"command"`
 		HeadlessFlags []string          `yaml:"headlessFlags"`
 		ContainerEnv  map[string]string `yaml:"containerEnv"`
+		// Image is the box image for this agent. It should build FROM the runclave
+		// base and add the agent CLI. Empty falls back to the agent-agnostic base
+		// (which has git but not the agent, so the exec will fail).
+		Image string `yaml:"image"`
 	} `yaml:"run"`
 
 	Egress struct {

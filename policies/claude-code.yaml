@@ -6,6 +6,7 @@ scope: local
 type: cli-headless
 
 run:
+  image: runclave/claude-code:latest
   command: claude
   headlessFlags: ["-p"]
   # Quiet the box down: no auto-update, no non-essential traffic. Auth is injected

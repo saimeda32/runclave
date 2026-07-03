@@ -1,4 +1,4 @@
-.PHONY: build test vet images gateway-image base-image
+.PHONY: build test vet images gateway-image base-image claude-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o runclave ./cmd/runclave
@@ -18,3 +18,7 @@ base-image:
 
 gateway-image:
 	docker build -f docker/Dockerfile.gateway -t runclave/gateway:latest .
+
+# The claude-code pack's box image (base plus the Claude Code CLI).
+claude-image:
+	docker build -f docker/Dockerfile.claude-code -t runclave/claude-code:latest .
