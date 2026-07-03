@@ -190,9 +190,11 @@ func HasHostBindMount(createArgv []string) bool {
 }
 
 // HostBundleArgv builds the host-side command to bundle full history for transfer.
-// `--all` includes every ref (branches, tags, remotes) - equivalent to a mirror.
+// `--all` includes every ref (branches, tags, remotes). HEAD is added so a detached
+// checkout (a commit no branch points at) is carried too, and the box lands on the
+// same commit you were on.
 func HostBundleArgv(repoDir, outBundle string) []string {
-	return []string{"git", "-C", repoDir, "bundle", "create", outBundle, "--all"}
+	return []string{"git", "-C", repoDir, "bundle", "create", outBundle, "--all", "HEAD"}
 }
 
 // HostStashCreateArgv captures tracked staged+unstaged state as a commit object

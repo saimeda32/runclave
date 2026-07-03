@@ -133,7 +133,23 @@ func TestUntrackedCaptureIsShellFree(t *testing.T) {
 			if !strings.Contains(joined, "u.txt") || !strings.Contains(joined, "weird; name.txt") {
 				t.Fatalf("tar must receive each file as its own arg, got %v", a)
 			}
+			// must NOT dereference symlinks, or an untracked symlink could pull a
+			// host file from outside the repo into the box.
+			for _, tok := range a {
+				if tok == "-h" || tok == "--dereference" {
+					t.Fatalf("tar must not dereference symlinks, got %v", a)
+				}
+			}
 		}
+	}
+}
+
+// The history bundle carries HEAD as well as --all, so a detached checkout (a
+// commit no branch points at) still lands in the box.
+func TestBundleCarriesHead(t *testing.T) {
+	argv := strings.Join(HostBundleArgv("/repo", "/seed/repo.bundle"), " ")
+	if !strings.Contains(argv, "--all") || !strings.HasSuffix(argv, "HEAD") {
+		t.Fatalf("bundle must include --all and HEAD, got %q", argv)
 	}
 }
 

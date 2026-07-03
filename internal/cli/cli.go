@@ -374,6 +374,9 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  executing lifecycle...\n")
 	if err := lc.Execute(box.ExecRunner{}); err != nil {
 		fmt.Fprintf(stderr, "runclave: lifecycle failed: %v\n", err)
+		// Best-effort teardown so a half-provisioned box and its network don't
+		// linger and block the next run on a name collision.
+		_ = lc.Destroy(box.ExecRunner{})
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed")
 		return 1
 	}
