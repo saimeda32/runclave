@@ -37,6 +37,12 @@ auth:
   method: env-token
   envVar: CLAUDE_CODE_OAUTH_TOKEN
   deviceFlow: false
+  # Opt-in only (runclave . --login): where Claude Code keeps its login on the
+  # host, mounted read-only so the box starts already authenticated. Sharing these
+  # hands the box a long-lived credential; a scoped token via envVar is preferred.
+  loginPaths:
+    - "~/.claude"
+    - "~/.claude.json"
 
 paths:
   relocateEnv: CLAUDE_CONFIG_DIR

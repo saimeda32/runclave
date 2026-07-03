@@ -42,7 +42,7 @@ func testPack() *policy.Pack {
 func buildOK(t *testing.T) Plan {
 	t.Helper()
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "/host/dirty.bundle", "/host/untracked.tar")
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true)
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestPlanPassesEgressInvariants(t *testing.T) {
 // Non-docker driver is rejected (honest scope, not a silent wrong-CLI plan).
 func TestNonDockerRejected(t *testing.T) {
 	ws := workspace.BuildPlan("p", "/h/b", "", "")
-	if _, err := BuildPlan("b", nonDocker{}, testPack(), ws, "", "", false); err == nil {
+	if _, err := BuildPlan("b", nonDocker{}, testPack(), ws, "", "", false, nil, ""); err == nil {
 		t.Fatal("non-docker driver must be rejected by the docker-family plan")
 	}
 }
@@ -261,7 +261,7 @@ func TestDestroyRemovesBoxAndNet(t *testing.T) {
 func TestBrokerSocketMountNarrowlyAllowed(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
 	// With a broker socket configured, the plan must still pass its invariants.
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", false)
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestHostileBrokerSourceRejected(t *testing.T) {
 
 	// BuildPlan must refuse an invalid broker path outright (fail-closed).
 	ws := workspace.BuildPlan("p", "/h/b", "", "")
-	if _, err := BuildPlan("b", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/etc", false); err == nil {
+	if _, err := BuildPlan("b", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/etc", false, nil, ""); err == nil {
 		t.Fatal("BuildPlan must reject a non-socket broker path")
 	}
 }
@@ -391,13 +391,86 @@ func TestExecuteWrapsAndSequences(t *testing.T) {
 	}
 }
 
+// An opt-in login mount is a DECLARED hole: the plan must (a) carry exactly the
+// requested read-only bind, (b) still pass its own host-escape guard because that
+// one bind is sanctioned, and (c) reject anything not under the box home or with a
+// traversal/absolute-outside path.
+func TestLoginMountAllowedButNarrow(t *testing.T) {
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	good := []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, good, "/Users/me")
+	if err != nil {
+		t.Fatalf("a valid login mount must be accepted: %v", err)
+	}
+	// The read-only bind is actually present on the box-create step.
+	joined := ""
+	for _, s := range p.Steps {
+		joined += strings.Join(s.Argv, " ") + "\n"
+	}
+	if !strings.Contains(joined, "type=bind,src=/Users/me/.claude,dst="+BoxHome+"/.claude,ro") {
+		t.Fatalf("login mount must appear as a read-only bind, got:\n%s", joined)
+	}
+	// And the plan still passes its own guard - the sanctioned mount is stripped
+	// before the escape check, nothing else is.
+	if err := p.VerifyEgressInvariants(); err != nil {
+		t.Fatalf("plan with a sanctioned login mount must pass invariants: %v", err)
+	}
+}
+
+// A pack that tries to mount outside the box home, the host root, or via traversal
+// is rejected at plan build - the hole cannot be widened past the declared shape.
+func TestLoginMountRejectsEscape(t *testing.T) {
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	bad := [][]LoginMount{
+		{{HostPath: "/", BoxPath: BoxHome + "/x"}},                          // host root: whole-FS mount
+		{{HostPath: "/etc/shadow", BoxPath: "/etc/shadow"}},                 // box path outside the box home
+		{{HostPath: "/etc", BoxPath: BoxHome + "/.claude"}},                 // source outside the home root
+		{{HostPath: "/Users/other/.claude", BoxPath: BoxHome + "/.claude"}}, // another user's home
+		{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/../etc"}},     // traversal in box path
+		{{HostPath: "/Users/me/,x", BoxPath: BoxHome + "/.claude"}},         // option smuggling via comma
+	}
+	for _, m := range bad {
+		if _, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, m, "/Users/me"); err == nil {
+			t.Fatalf("login mount %v must be rejected", m)
+		}
+	}
+	// And with NO host root configured, a login mount is refused outright.
+	if _, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "",
+		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, ""); err == nil {
+		t.Fatal("login mounts with no host root must be refused")
+	}
+}
+
+// An attacker-crafted plan that hand-inserts an UNsanctioned mount (not matching
+// any declared LoginMount) must still be caught by the guard - stripping is only
+// for the exact declared specs.
+func TestGuardCatchesUnsanctionedMount(t *testing.T) {
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "",
+		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, "/Users/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Splice a DIFFERENT host mount into the box-create step, as a compromised
+	// planner might. It is not in p.LoginMounts, so it is not stripped -> caught.
+	for i, s := range p.Steps {
+		if isContainerCreate(s.Argv) && flagValueEq(s.Argv, "--name") == p.Name {
+			evil := append([]string{s.Argv[0], s.Argv[1], "--mount", "type=bind,src=/etc,dst=" + BoxHome + "/etc,ro"}, s.Argv[2:]...)
+			p.Steps[i].Argv = evil
+		}
+	}
+	if err := p.VerifyEgressInvariants(); err == nil {
+		t.Fatal("an unsanctioned host mount must be caught by the guard")
+	}
+}
+
 // When a broker socket is present, the plan points in-box git at the broker
 // credential helper (so a push fetches a short-lived token) and turns on
 // useHttpPath (so the broker can log any repo mismatch). Without a socket, no
 // such step exists.
 func TestBrokerWiresGitCredentialHelper(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
-	withSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true)
+	withSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +485,7 @@ func TestBrokerWiresGitCredentialHelper(t *testing.T) {
 		t.Fatalf("broker socket must enable useHttpPath, got:\n%s", joined)
 	}
 	// No socket -> no credential-helper wiring.
-	noSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true)
+	noSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +503,7 @@ func TestAuthTokenPassedByNameNotValue(t *testing.T) {
 	pack := testPack()
 	pack.Auth.EnvVar = "CLAUDE_CODE_OAUTH_TOKEN"
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true)
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

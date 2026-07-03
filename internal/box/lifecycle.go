@@ -42,13 +42,15 @@ type Step struct {
 
 // Plan is the full ordered lifecycle.
 type Plan struct {
-	Name        string
-	Net         string   // the internal sandbox-net (the ONLY net the WORKLOAD box may join)
-	GatewayName string   // the egress-proxy gateway container (may also join OutboundNet)
-	OutboundNet string   // the net with real internet egress - ONLY the gateway may join it
-	BrokerSock  string   // host path of the per-session broker socket (mounted read-only)
-	Allowlist   []string // the exact egress allowlist the gateway proxy must enforce
-	Steps       []Step
+	Name          string
+	Net           string       // the internal sandbox-net (the ONLY net the WORKLOAD box may join)
+	GatewayName   string       // the egress-proxy gateway container (may also join OutboundNet)
+	OutboundNet   string       // the net with real internet egress - ONLY the gateway may join it
+	BrokerSock    string       // host path of the per-session broker socket (mounted read-only)
+	LoginMounts   []LoginMount // opt-in read-only login binds the box-create step may carry
+	LoginHostRoot string       // the host dir every LoginMount source MUST sit under (the user's home)
+	Allowlist     []string     // the exact egress allowlist the gateway proxy must enforce
+	Steps         []Step
 }
 
 // brokerDst is the fixed in-box path the broker socket is mounted at. The in-box
@@ -109,6 +111,82 @@ func removeBrokerMount(a []string, sock string) []string {
 	return out
 }
 
+// BoxHome is the box user's home directory. It matches the Dockerfiles (uid
+// 10001, user `runclave`), and login material is mounted under it so the agent
+// finds it where it expects (e.g. ~/.claude -> /home/runclave/.claude).
+const BoxHome = "/home/runclave"
+
+// LoginMount is one opt-in read-only bind of a host login path into the box, so an
+// agent reuses your machine's existing login (`runclave . --login`). Unlike the
+// broker socket, this is a real filesystem bind - a DECLARED hole in the W6
+// isolation. It is allowed only for the exact paths a pack lists, only read-only,
+// only when the user asks.
+type LoginMount struct {
+	HostPath string // absolute host path (already ~-expanded and validated under $HOME)
+	BoxPath  string // absolute in-box destination under BoxHome
+}
+
+// loginMountSpec renders the ONE permitted shape: a read-only bind of exactly this
+// host path to exactly this box path. Read-only so a compromised agent cannot
+// rewrite your host login files.
+func loginMountSpec(m LoginMount) string {
+	return "type=bind,src=" + m.HostPath + ",dst=" + m.BoxPath + ",ro"
+}
+
+// validLoginMount is the floor the guard trusts before stripping a login mount:
+// absolute host path, host path CONFINED under hostRoot (the user's home), box path
+// under BoxHome, no option/traversal smuggling, never the host root. hostRoot makes
+// the box layer safe on its own - it does not depend on the CLI having pre-confined
+// the path. If hostRoot is empty (no login sharing configured) nothing is eligible.
+func validLoginMount(m LoginMount, hostRoot string) bool {
+	if hostRoot == "" {
+		return false
+	}
+	if !strings.HasPrefix(m.HostPath, "/") || !strings.HasPrefix(m.BoxPath, BoxHome+"/") {
+		return false
+	}
+	if m.HostPath == "/" { // never a whole-filesystem bind
+		return false
+	}
+	// The source MUST live under the user's home; /etc, /root, another user's home,
+	// /proc, etc. are refused here, not just at the CLI.
+	if m.HostPath != hostRoot && !strings.HasPrefix(m.HostPath, hostRoot+"/") {
+		return false
+	}
+	for _, p := range []string{m.HostPath, m.BoxPath} {
+		if strings.ContainsAny(p, ",") || strings.Contains(p, "..") {
+			return false
+		}
+	}
+	return true
+}
+
+// removeLoginMounts strips ONLY the exact validated login-mount specs, so the rest
+// of argv is still checked by HasHostEscape. An INVALID mount is not stripped -
+// it stays visible to HasHostEscape and gets the plan rejected - so a hostile
+// src=/ can never be hidden. Any other mount (a dir bind, -v, a different path) is
+// left in place and caught.
+func removeLoginMounts(a []string, mounts []LoginMount, hostRoot string) []string {
+	specs := map[string]bool{}
+	for _, m := range mounts {
+		if validLoginMount(m, hostRoot) {
+			specs[loginMountSpec(m)] = true
+		}
+	}
+	if len(specs) == 0 {
+		return a
+	}
+	out := make([]string, 0, len(a))
+	for i := 0; i < len(a); i++ {
+		if a[i] == "--mount" && i+1 < len(a) && specs[a[i+1]] {
+			i++ // skip the spec value too
+			continue
+		}
+		out = append(out, a[i])
+	}
+	return out
+}
+
 func sandboxNet(name string) string { return "runclave-net-" + name }
 
 // setNetwork replaces the --network value in a `docker run` argv with net (or
@@ -140,7 +218,7 @@ func DestroyPlan(name string) Plan {
 }
 
 // BuildPlan assembles the Docker-family lifecycle. Errors for non-docker drivers.
-func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.Plan, proxyAddr, brokerSock string, includeDirty bool) (Plan, error) {
+func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.Plan, proxyAddr, brokerSock string, includeDirty bool, loginMounts []LoginMount, loginHostRoot string) (Plan, error) {
 	if name == "" || drv == nil || pack == nil {
 		return Plan{}, fmt.Errorf("box: name, driver and pack are required")
 	}
@@ -151,6 +229,17 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// runclave-owned prefix - never an arbitrary host path.
 	if brokerSock != "" && !validBrokerSock(brokerSock) {
 		return Plan{}, fmt.Errorf("box: broker socket %q is not a valid runclave socket path (must be a .sock under %s)", brokerSock, brokerSockPrefix)
+	}
+	// Fail-closed: every requested login mount must pass the floor before we build a
+	// plan that strips it past the host-escape guard. A pack listing `/` or a
+	// traversal path is rejected here, not silently mounted.
+	if len(loginMounts) > 0 && loginHostRoot == "" {
+		return Plan{}, fmt.Errorf("box: login mounts require a host root to confine them under; refusing")
+	}
+	for _, m := range loginMounts {
+		if !validLoginMount(m, loginHostRoot) {
+			return Plan{}, fmt.Errorf("box: login mount %q->%q not permitted (source must be under %s, box path under %s, no '..'/',')", m.HostPath, m.BoxPath, loginHostRoot, BoxHome)
+		}
 	}
 	net := sandboxNet(name)
 	gwName := name + "-gw"
@@ -188,11 +277,23 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 		boxImage = "runclave/base:latest"
 	}
 	boxArgv := setNetwork(drv.CreateArgs(name, boxImage), net)
-	if brokerSock != "" && len(boxArgv) >= 2 && boxArgv[0] == "docker" && boxArgv[1] == "run" {
-		boxArgv = append(boxArgv[:2], append([]string{"--mount", allowedBrokerMountSpec(brokerSock)}, boxArgv[2:]...)...)
+	if len(boxArgv) >= 2 && boxArgv[0] == "docker" && boxArgv[1] == "run" {
+		var inserts []string
+		if brokerSock != "" {
+			inserts = append(inserts, "--mount", allowedBrokerMountSpec(brokerSock))
+		}
+		for _, m := range loginMounts { // opt-in, read-only, exact declared paths
+			inserts = append(inserts, "--mount", loginMountSpec(m))
+		}
+		if len(inserts) > 0 {
+			merged := append([]string{}, boxArgv[:2]...)
+			merged = append(merged, inserts...)
+			merged = append(merged, boxArgv[2:]...)
+			boxArgv = merged
+		}
 	}
 	steps = append(steps,
-		Step{Desc: "provision box (hardened, on internal net ONLY, broker socket ro)", Argv: boxArgv},
+		Step{Desc: "provision box (hardened, on internal net ONLY; broker socket + any --login mounts ro)", Argv: boxArgv},
 	)
 	// The box routes egress at the gateway's name on the internal net.
 	proxyAddr = gwName + ":8888"
@@ -261,7 +362,7 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 		Env:     env,
 		PassEnv: passEnv,
 	})
-	return Plan{Name: name, Net: net, GatewayName: gwName, OutboundNet: outNet, BrokerSock: brokerSock, Allowlist: pack.AllowedDomains(), Steps: steps}, nil
+	return Plan{Name: name, Net: net, GatewayName: gwName, OutboundNet: outNet, BrokerSock: brokerSock, LoginMounts: loginMounts, LoginHostRoot: loginHostRoot, Allowlist: pack.AllowedDomains(), Steps: steps}, nil
 }
 
 // VerifyEgressInvariants checks the plan's OWN structure for the F1/W6 invariants.
@@ -288,7 +389,11 @@ func (p Plan) VerifyEgressInvariants() error {
 		// every mount on every other step, is still caught by HasHostEscape.
 		checkArgv := s.Argv
 		if isContainerCreate(s.Argv) && flagValueEq(s.Argv, "--name") == p.Name {
+			// Strip ONLY the two sanctioned exceptions - the broker socket and the
+			// exact opt-in login mounts - before the escape check. Everything else,
+			// including any other mount, is still caught.
 			checkArgv = removeBrokerMount(s.Argv, p.BrokerSock)
+			checkArgv = removeLoginMounts(checkArgv, p.LoginMounts, p.LoginHostRoot)
 		}
 		if workspace.HasHostEscape(checkArgv) {
 			return fmt.Errorf("box: step %q grants host-disk access (W6)", s.Desc)

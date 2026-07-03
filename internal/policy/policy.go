@@ -41,6 +41,12 @@ type Pack struct {
 		EnvVar     string `yaml:"envVar"`
 		TokenPath  string `yaml:"tokenPath"`
 		DeviceFlow bool   `yaml:"deviceFlow"`
+		// LoginPaths are the host paths (under the user's home, ~ allowed) that hold
+		// THIS agent's existing login, so `runclave . --login` can mount them
+		// read-only and the agent reuses your machine's login instead of you exporting
+		// a token. Opt-in only: sharing a login file punches a declared hole in the
+		// filesystem isolation and hands the box a long-lived, unscoped credential.
+		LoginPaths []string `yaml:"loginPaths"`
 	} `yaml:"auth"`
 
 	Paths struct {

@@ -40,6 +40,8 @@ Usage:
 Flags:
   --backend <name>   force a backend (apple-container | docker); default: strongest available
   --clean            clone HEAD only, without uncommitted working-tree changes
+  --login            mount this agent's existing host login (read-only) so it starts
+                     logged in; shares a long-lived credential, off by default
   --policies <dir>   opt-in dir of on-disk policy packs; default is the embedded
                      trusted packs. A repo-local ./policies is NEVER auto-used (P5).
 `
@@ -409,6 +411,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	wantBackend := fs.String("backend", "", "force a backend")
 	clean := fs.Bool("clean", false, "clone HEAD only (no uncommitted changes)")
 	dryRun := fs.Bool("dry-run", false, "print the verified lifecycle plan without executing it")
+	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -470,11 +473,21 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	ws := workspace.BuildPlan(filepath.Base(cwd), bundle, dirty, untracked)
+	// Opt-in login sharing: only when --login is passed do we mount this agent's
+	// existing host login (read-only) so it starts already authenticated.
+	loginMounts, loginHostRoot, err := buildLoginMounts(pol, *login, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave: %v\n", err)
+		return 1
+	}
+	var loginShared []string // for the receipt audit trail
+	for _, m := range loginMounts {
+		loginShared = append(loginShared, m.HostPath)
+	}
 	// Broker socket is not mounted yet: the host-side broker daemon that creates
-	// the socket isn't built (pending). Passing "" omits the mount so the box comes
-	// up; git-credential brokering lands when the daemon does. (Mounting a
-	// non-existent socket path would fail `docker run` with exit 125.)
-	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", "", !*clean)
+	// the socket isn't auto-started by this path yet. Passing "" omits the mount so
+	// the box comes up; git-credential brokering lands when auto-start does.
+	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", "", !*clean, loginMounts, loginHostRoot)
 	if err != nil {
 		// Non-docker driver etc. - report honestly, don't fake a run.
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
@@ -504,7 +517,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "    %s\n", line)
 		}
 		fmt.Fprintf(stdout, "  NOT YET WIRED: broker socket mount. Images are defined (docker/Dockerfile.{base,gateway,claude-code}); run `make images` once before a real run.\n")
-		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned")
+		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned", loginShared...)
 		return 0
 	}
 
@@ -514,18 +527,98 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		// Best-effort teardown so a half-provisioned box and its network don't
 		// linger and block the next run on a name collision.
 		_ = lc.Destroy(box.ExecRunner{})
-		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed")
+		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", loginShared...)
 		return 1
 	}
 	fmt.Fprintf(stdout, "  box up (egress via gateway proxy). NOT YET WIRED: broker socket mount\n")
-	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted")
+	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", loginShared...)
 	return 0
+}
+
+// buildLoginMounts turns the pack's declared login paths into read-only box
+// mounts, but ONLY when the user passed --login. It is deliberately strict: each
+// path must resolve (following symlinks) to somewhere under the user's own home,
+// so a pack cannot ask to mount /etc, /, or another user's files, and a dotfile
+// that is a symlink pointing outside home cannot smuggle a host path in (docker
+// binds the symlink's TARGET, so we confine on the resolved target). A missing
+// path is skipped with a note rather than failing the run. It returns the home
+// root so the box layer can independently re-confine every mount, and warns loudly
+// that a long-lived, unscoped credential is being shared.
+func buildLoginMounts(pol *policy.Pack, want bool, stderr io.Writer) ([]box.LoginMount, string, error) {
+	if !want {
+		return nil, "", nil
+	}
+	if len(pol.Auth.LoginPaths) == 0 {
+		fmt.Fprintf(stderr, "runclave: --login given but the %s pack declares no login paths; nothing to share\n", pol.Agent)
+		return nil, "", nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil, "", fmt.Errorf("--login: cannot resolve your home directory")
+	}
+	// Canonicalize home too, so the "resolved target under home" check below compares
+	// like with like even when home itself sits behind a symlink (e.g. /var -> /private/var).
+	if r, e := filepath.EvalSymlinks(home); e == nil {
+		home = r
+	}
+	home = filepath.Clean(home)
+	underHome := func(p string) bool {
+		return p == home || strings.HasPrefix(p, home+string(os.PathSeparator))
+	}
+	var mounts []box.LoginMount
+	var shared []string
+	for _, raw := range pol.Auth.LoginPaths {
+		host := raw
+		if host == "~" {
+			host = home
+		} else if strings.HasPrefix(host, "~/") {
+			host = filepath.Join(home, host[2:])
+		}
+		host = filepath.Clean(host)
+		if !filepath.IsAbs(host) {
+			return nil, "", fmt.Errorf("--login: pack login path %q did not resolve to an absolute path", raw)
+		}
+		// The declared (link) path must itself be under home...
+		if !underHome(host) {
+			return nil, "", fmt.Errorf("--login: pack login path %q is outside your home (%s); refusing", raw, home)
+		}
+		if _, statErr := os.Lstat(host); statErr != nil {
+			fmt.Fprintf(stderr, "runclave: --login: %s not found on this machine, skipping (are you logged in?)\n", host)
+			continue
+		}
+		// ...and so must the RESOLVED target, because docker follows a symlinked
+		// bind source host-side. Without this, ~/.claude -> /etc would mount /etc.
+		real, evErr := filepath.EvalSymlinks(host)
+		if evErr != nil {
+			fmt.Fprintf(stderr, "runclave: --login: cannot resolve %s, skipping (%v)\n", host, evErr)
+			continue
+		}
+		real = filepath.Clean(real)
+		if !underHome(real) {
+			return nil, "", fmt.Errorf("--login: pack login path %q resolves to %q, outside your home (%s); refusing", raw, real, home)
+		}
+		// Mount the RESOLVED source (what docker binds anyway) but keep the box
+		// destination at the path the agent expects (derived from the declared name).
+		boxPath := box.BoxHome + strings.TrimPrefix(host, home)
+		if boxPath == box.BoxHome { // the declared path was home itself: would over-share
+			return nil, "", fmt.Errorf("--login: pack login path %q is your whole home; refusing", raw)
+		}
+		mounts = append(mounts, box.LoginMount{HostPath: real, BoxPath: boxPath})
+		shared = append(shared, real)
+	}
+	if len(mounts) > 0 {
+		fmt.Fprintf(stderr, "runclave: WARNING - --login shares your real %s login (read-only) with the box: %s\n"+
+			"  This is a long-lived, unscoped credential, not a short-lived brokered token. If the box is\n"+
+			"  compromised the credential can be used until you rotate it. Prefer a scoped token when you can.\n",
+			pol.Agent, strings.Join(shared, ", "))
+	}
+	return mounts, home, nil
 }
 
 // writeRunReceipt emits the A3 run receipt: the effective boundary + disposition,
 // separate from any transcript. Egress allow/deny counts live in the gateway
 // container's logs (not host-visible yet) - recorded honestly as -1/unknown here.
-func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []byte, backend, disposition string) {
+func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []byte, backend, disposition string, loginShared ...string) {
 	r := ledger.Receipt{
 		Agent:         pol.Agent,
 		PolicyHash:    ledger.PolicyHash(rawPol),
@@ -533,6 +626,7 @@ func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []b
 		AllowedEgress: pol.AllowedDomains(),
 		EgressAllowed: -1, // -1 = not host-visible (gateway-side); honest, not faked 0
 		EgressDenied:  -1,
+		LoginShared:   loginShared,
 		Disposition:   disposition,
 	}
 	path := filepath.Join(os.TempDir(), "runclave-"+name+"-receipt.json")

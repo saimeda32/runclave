@@ -132,7 +132,8 @@ type Receipt struct {
 	EgressAllowed int64     `json:"egress_allowed"`
 	EgressDenied  int64     `json:"egress_denied"`
 	FilesChanged  int       `json:"files_changed"`
-	Disposition   string    `json:"disposition"` // planned | persisted | destroyed | failed
+	LoginShared   []string  `json:"login_shared,omitempty"` // host login paths mounted into the box via --login (audit trail)
+	Disposition   string    `json:"disposition"`            // planned | persisted | destroyed | failed
 	LedgerEntries int       `json:"ledger_entries"`
 	LedgerHead    string    `json:"ledger_head"`
 	StartedAt     time.Time `json:"started_at"`
