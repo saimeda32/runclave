@@ -148,7 +148,26 @@ func Load(path string) (*Pack, error) {
 // Find resolves an agent pack. Precedence: a `--policies <dir>` override on disk
 // (for local/experimental packs), else the pack embedded in the binary (so
 // `runclave .` works in any repo). Empty dir = embedded only.
+// validAgentName rejects a pack name that isn't a plain slug, so a caller-supplied
+// name (e.g. `--agent`, `run <agent>`) can never traverse out of the policies dir
+// with `/` or `..`. Embedded lookup via embed.FS already rejects `..`; this closes
+// the on-disk (`--policies`) path too.
+func validAgentName(agent string) bool {
+	if agent == "" || len(agent) > 64 {
+		return false
+	}
+	for _, r := range agent {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func Find(dir, agent string) (*Pack, error) {
+	if !validAgentName(agent) {
+		return nil, fmt.Errorf("policy: invalid agent name %q (letters, digits, - and _ only)", agent)
+	}
 	if dir != "" {
 		if path := filepath.Join(dir, agent+".yaml"); fileExists(path) {
 			return Load(path)

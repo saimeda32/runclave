@@ -88,3 +88,23 @@ scope: track-only
 		t.Fatalf("track-only pack should validate: %v", err)
 	}
 }
+
+// A caller-supplied agent name must never traverse out of the policies dir. Both
+// Find and RawBytes reject a name with path separators or `..`, on-disk or embedded.
+func TestAgentNameTraversalRejected(t *testing.T) {
+	bad := []string{"../../etc/passwd", "..", "a/b", "a\\b", "with space", ""}
+	for _, name := range bad {
+		if _, err := Find("/tmp", name); err == nil {
+			t.Fatalf("Find must reject agent name %q", name)
+		}
+		if _, err := RawBytes("/tmp", name); err == nil {
+			t.Fatalf("RawBytes must reject agent name %q", name)
+		}
+	}
+	// The real packs still resolve.
+	for _, name := range []string{"claude-code", "gemini-cli"} {
+		if _, err := Find("", name); err != nil {
+			t.Fatalf("Find(%q) must still work: %v", name, err)
+		}
+	}
+}
