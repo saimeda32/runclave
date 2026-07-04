@@ -464,6 +464,39 @@ func TestGuardCatchesUnsanctionedMount(t *testing.T) {
 	}
 }
 
+// --shell rewrites only the FINAL step into an interactive in-box shell, keeping
+// the box/gateway/seed and the egress env intact, and it still passes the guard.
+func TestInteractiveShellPlan(t *testing.T) {
+	p := buildOK(t)
+	nSteps := len(p.Steps)
+	execEnv := p.Steps[nSteps-1].Env // the agent exec's egress env
+	p.SetInteractiveShell("bash")
+	if len(p.Steps) != nSteps {
+		t.Fatalf("--shell must not add or drop steps, got %d want %d", len(p.Steps), nSteps)
+	}
+	last := p.Steps[nSteps-1]
+	if !last.Interactive || len(last.Argv) != 1 || last.Argv[0] != "bash" {
+		t.Fatalf("final step must be an interactive bash, got %+v", last)
+	}
+	// The shell keeps the same egress env (so it's inside the same boundary + proxy).
+	if last.Env["HTTP_PROXY"] != execEnv["HTTP_PROXY"] || last.Env["HTTP_PROXY"] == "" {
+		t.Fatalf("shell must keep the agent's proxy env, got %v", last.Env)
+	}
+	// The plan still satisfies the egress/host invariants.
+	if err := p.VerifyEgressInvariants(); err != nil {
+		t.Fatalf("interactive-shell plan must pass invariants: %v", err)
+	}
+	// It renders as an attached `docker exec -it <box> bash`.
+	r := &fakeRunner{}
+	if err := p.Execute(r); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.calls[len(r.calls)-1], " ")
+	if !strings.HasPrefix(joined, "docker exec -it ") || !strings.HasSuffix(joined, " bash") {
+		t.Fatalf("shell step must render as `docker exec -it <box> bash`, got %q", joined)
+	}
+}
+
 // The broker socket may live in any runclave-OWNED directory (so a per-session
 // socket under the user's runtime/cache dir works without root), but an arbitrary
 // host path is never eligible for the mount exception.

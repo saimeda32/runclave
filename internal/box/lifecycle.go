@@ -39,6 +39,16 @@ type Step struct {
 	// environment. This keeps secrets (e.g. an auth token) off the argv, so they do
 	// not appear in host `ps`, and out of a rendered/dry-run plan.
 	PassEnv []string
+	// Interactive marks a step that attaches the caller's terminal (a `docker exec
+	// -it` shell). It runs via a Runner that implements InteractiveRunner; a plain
+	// Runner (dry-run/tests) just records the argv.
+	Interactive bool
+}
+
+// InteractiveRunner is an optional Runner capability: run a step attached to the
+// caller's stdio/TTY (for an interactive in-box shell) instead of capturing output.
+type InteractiveRunner interface {
+	RunInteractive(argv []string) error
 }
 
 // Plan is the full ordered lifecycle.
@@ -677,6 +687,9 @@ func (p Plan) Execute(r Runner) error {
 		argv := s.Argv
 		if s.InBox {
 			wrap := []string{"docker", "exec"}
+			if s.Interactive {
+				wrap = append(wrap, "-it") // attach the terminal for a shell
+			}
 			for k, v := range s.Env {
 				wrap = append(wrap, "-e", k+"="+v)
 			}
@@ -688,9 +701,34 @@ func (p Plan) Execute(r Runner) error {
 			wrap = append(wrap, p.Name)
 			argv = append(wrap, s.Argv...)
 		}
+		// An interactive step attaches the caller's TTY when the runner supports it;
+		// a plain runner (dry-run/tests) just records the argv like any other step.
+		if s.Interactive {
+			if ir, ok := r.(InteractiveRunner); ok {
+				if err := ir.RunInteractive(argv); err != nil {
+					return fmt.Errorf("box: step %q failed: %w", s.Desc, err)
+				}
+				continue
+			}
+		}
 		if _, err := r.Run(argv); err != nil {
 			return fmt.Errorf("box: step %q failed: %w", s.Desc, err)
 		}
 	}
 	return nil
+}
+
+// SetInteractiveShell rewrites the final (agent-exec) step into an interactive
+// in-box shell, keeping the same egress/auth env so the shell has the same network
+// boundary and login the agent would. Everything before it - the isolated box, the
+// gateway, the seed - is unchanged, so `--shell` is the same sandbox, just a prompt
+// instead of a headless agent.
+func (p *Plan) SetInteractiveShell(shell string) {
+	if len(p.Steps) == 0 {
+		return
+	}
+	last := &p.Steps[len(p.Steps)-1]
+	last.Desc = "interactive shell (" + shell + ")"
+	last.Argv = []string{shell}
+	last.Interactive = true
 }

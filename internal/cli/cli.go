@@ -44,6 +44,8 @@ Usage:
 Flags:
   --backend <name>   force a backend (apple-container | docker); default: strongest available
   --clean            clone HEAD only, without uncommitted working-tree changes
+  --shell            drop into an interactive shell in the box instead of running
+                     the agent (same isolation and egress boundary)
   --login            mount this agent's existing host login (read-only) so it starts
                      logged in; shares a long-lived credential, off by default
   --policies <dir>   opt-in dir of on-disk policy packs; default is the embedded
@@ -533,6 +535,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	clean := fs.Bool("clean", false, "clone HEAD only (no uncommitted changes)")
 	dryRun := fs.Bool("dry-run", false, "print the verified lifecycle plan without executing it")
 	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
+	shell := fs.Bool("shell", false, "drop into an interactive shell in the box instead of running the agent (same isolation and egress boundary)")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -658,6 +661,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
 		return 1
 	}
+	// --shell: same box, same egress boundary, same seed - just an interactive shell
+	// in place of the headless agent exec.
+	if *shell {
+		lc.SetInteractiveShell("bash")
+	}
 	// Enforce the egress/host invariants BEFORE any execution. Refuse to run a
 	// plan that would open host egress or host-disk access (F1/W6).
 	if err := lc.VerifyEgressInvariants(); err != nil {
@@ -690,7 +698,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "  executing lifecycle...\n")
+	if *shell {
+		fmt.Fprintf(stdout, "  box up. dropping you into a shell (type 'exit' to leave; the box persists)...\n")
+	} else {
+		fmt.Fprintf(stdout, "  executing lifecycle...\n")
+	}
 	if err := lc.Execute(box.ExecRunner{}); err != nil {
 		fmt.Fprintf(stderr, "runclave: lifecycle failed: %v\n", err)
 		// Best-effort teardown so a half-provisioned box and its network don't
@@ -699,7 +711,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", loginShared...)
 		return 1
 	}
-	fmt.Fprintf(stdout, "  box up (egress via gateway proxy)\n")
+	if *shell {
+		fmt.Fprintf(stdout, "  shell session ended (box persists; `runclave destroy %s` to remove)\n", name)
+	} else {
+		fmt.Fprintf(stdout, "  box up (egress via gateway proxy)\n")
+	}
 	if brokerSock != "" {
 		// Honest lifetime: the broker served the agent's git DURING this run and
 		// stops now, on return. The box is detached and persists; if you re-enter it

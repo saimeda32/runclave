@@ -28,7 +28,7 @@ Early, but the core works. The Docker path runs end to end today: `runclave .` i
 
 What's built and tested:
 
-- the one-command `runclave .` flow on Docker or Colima
+- the one-command `runclave .` flow on Docker or Colima, headless or `--shell` interactive
 - the internal-network plus gateway-proxy egress boundary, with a pre-flight check that refuses to run if the boundary isn't intact
 - the two-payload workspace seed, so the box's `git status` matches your laptop
 - a Claude Code box image with the CLI baked in
@@ -101,6 +101,9 @@ Flags for `runclave .`:
 ```
 --backend <name>   force a backend (docker today); default is the strongest available
 --clean            clone HEAD only, without your uncommitted working-tree changes
+--shell            drop into an interactive shell in the box instead of running the
+                   agent. Same clone, same egress boundary, same login. Type exit to
+                   leave; the box persists.
 --login            mount this agent's existing host login read-only so it starts
                    logged in. Off by default. Shares a long-lived credential, so it
                    warns and records it on the receipt.

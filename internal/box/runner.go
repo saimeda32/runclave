@@ -1,6 +1,7 @@
 package box
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -20,6 +21,18 @@ func (ExecRunner) Run(argv []string) (string, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// RunInteractive runs argv attached to the caller's terminal, for an in-box shell
+// (`docker exec -it … bash`). stdio is inherited so the user gets a real TTY; the
+// inherited environment still supplies any `-e NAME` pass-through secret.
+func (ExecRunner) RunInteractive(argv []string) error {
+	if len(argv) == 0 {
+		return nil
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
 }
 
 // DaemonAvailable reports whether a docker daemon is reachable, so the caller can
