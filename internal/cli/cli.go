@@ -622,7 +622,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	// command still comes from the pack, so the image just has to contain that CLI.
 	if *image != "" {
 		pol.Run.Image = *image
-		fmt.Fprintf(stderr, "runclave: box image overridden to %s (egress + isolation unchanged)\n", *image)
+		fmt.Fprintf(stderr, "runclave: box image overridden to %s. The egress allowlist and isolation are unchanged, but the host pulls this image over its own network (outside the sandbox) and runs it as the box, so only use an image you trust.\n", *image)
 	}
 
 	// Interim auth: if the pack names an auth env var, the exec step passes it to the
@@ -876,10 +876,18 @@ func buildLoginMounts(pol *policy.Pack, want bool, stderr io.Writer) ([]box.Logi
 // separate from any transcript. Egress allow/deny counts live in the gateway
 // container's logs (not host-visible yet) - recorded honestly as -1/unknown here.
 func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []byte, backend, disposition string, egressAllow, egressDeny int64, loginShared ...string) {
+	// Record the box image actually booted. This matters when --image overrode the
+	// pack's image: the policy hash is of the pack bytes and would not reflect it, so
+	// the effective image is captured here for the audit trail.
+	effImage := pol.Run.Image
+	if effImage == "" {
+		effImage = "runclave/base:latest"
+	}
 	r := ledger.Receipt{
 		Agent:         pol.Agent,
 		PolicyHash:    ledger.PolicyHash(rawPol),
 		Backend:       backend,
+		Image:         effImage,
 		AllowedEgress: pol.AllowedDomains(),
 		EgressAllowed: egressAllow, // -1 when not read (planned/failed); real counts from the gateway log on a persisted run
 		EgressDenied:  egressDeny,

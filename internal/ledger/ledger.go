@@ -127,6 +127,7 @@ type Receipt struct {
 	Agent         string    `json:"agent"`
 	PolicyHash    string    `json:"policy_hash"`
 	Backend       string    `json:"backend"`
+	Image         string    `json:"image,omitempty"` // the box image actually booted (records an --image override the policy hash doesn't reflect)
 	GrantedWrite  []string  `json:"granted_write_scopes"`
 	AllowedEgress []string  `json:"allowed_egress"`
 	EgressAllowed int64     `json:"egress_allowed"`

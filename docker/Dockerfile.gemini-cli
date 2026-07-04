@@ -1,8 +1,9 @@
 # Box image for the gemini-cli pack: the runclave base plus the Gemini CLI.
-# The CLI is installed at build time, so the box does not need any network to set
-# itself up. At run time gemini reaches generativelanguage.googleapis.com (or
-# cloudcode-pa.googleapis.com on the Google-login path) through the gateway proxy,
-# which the gemini-cli pack already allows.
+# The CLI is installed at build time (unpinned -> whatever is latest then; the pack's
+# flags were observed on v0.49.0 and are stable across recent releases). The box thus
+# needs no network to install itself. At run time gemini reaches
+# generativelanguage.googleapis.com (or cloudcode-pa.googleapis.com on the Google-login
+# path) through the gateway proxy, which the gemini-cli pack already allows.
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum* ./

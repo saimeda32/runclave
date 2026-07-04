@@ -1,8 +1,10 @@
 # Gemini CLI policy pack - the second agent, proving the model is agent-neutral.
-# Facts grounded by running the CLI in a container (v0.49.0): command `gemini`,
-# `-p/--prompt` is non-interactive/headless, `GEMINI_API_KEY` (or a Google login in
-# ~/.gemini) is the auth, and it complains to set one of GEMINI_API_KEY /
-# GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_GCA when none is present.
+# OBSERVED by running the CLI in a container (v0.49.0): command `gemini`, `-p/--prompt`
+# is non-interactive/headless, and with no auth it asks to set GEMINI_API_KEY /
+# GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_GCA and points at ~/.gemini/settings.json.
+# The egress domains below are INFERRED from Google's documented endpoints, not yet
+# captured through the proxy with a real key - tighten them from a real ALLOW/DENY
+# trace when one is available.
 # This file is DATA, not code (criterion P4): no executable hooks.
 agent: gemini-cli
 scope: local
@@ -21,10 +23,13 @@ egress:
   model:
     - generativelanguage.googleapis.com # Gemini API, the GEMINI_API_KEY path
     - cloudcode-pa.googleapis.com        # Code Assist, the Google-login (GCA) path
-  # infra: OAuth token refresh for the Google-login path
+  # infra the agent legitimately needs. oauth2.googleapis.com is token REFRESH for the
+  # login path (interactive consent at accounts.google.com can't happen in a headless
+  # box, so it is deliberately NOT allowed). github.com lets brokered `git push` reach
+  # the origin - without it the broker mints a token the proxy would then deny.
   infra:
     - oauth2.googleapis.com
-    - accounts.google.com
+    - github.com
 
 auth:
   # API-key via env is the cleanest bridge; a Google login under ~/.gemini is the
@@ -32,9 +37,10 @@ auth:
   method: env-token
   envVar: GEMINI_API_KEY
   deviceFlow: false
-  # Opt-in only (runclave . --login): where Gemini CLI keeps its settings and Google
-  # login on the host, mounted read-only. Sharing hands the box a long-lived
-  # credential; a scoped GEMINI_API_KEY via envVar is preferred.
+  # Opt-in only (runclave . --login): mounts all of ~/.gemini read-only. That is more
+  # than the login - it also exposes settings.json (which is the MCP config below, and
+  # can hold third-party MCP secrets) and local chat history to the box. Sharing hands
+  # the box a long-lived credential; a scoped GEMINI_API_KEY via envVar is preferred.
   loginPaths:
     - "~/.gemini"
 

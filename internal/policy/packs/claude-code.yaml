@@ -22,10 +22,13 @@ egress:
     - api.anthropic.com
     - claude.ai
     - platform.claude.com
-  # infra: installer/updater + package registry the agent legitimately needs
+  # infra: installer/updater + package registry the agent legitimately needs, plus
+  # github.com so brokered `git push` reaches the origin (without it the broker would
+  # mint a token the proxy then denies).
   infra:
     - downloads.claude.ai
     - registry.npmjs.org
+    - github.com
   # telemetry: denied by default. Claude Code works fine without these.
   telemetry_deny:
     - statsig.anthropic.com

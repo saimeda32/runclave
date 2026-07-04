@@ -163,6 +163,25 @@ func TestSessionBrokerSocket(t *testing.T) {
 	}
 }
 
+// The receipt records the box image actually booted, so an --image override (which
+// the policy hash does not reflect) is still on the audit trail.
+func TestReceiptRecordsEffectiveImage(t *testing.T) {
+	pol := &policy.Pack{Agent: "x"}
+	pol.Run.Image = "runclave/all:latest"
+	pol.Egress.Model = []string{"example.com"}
+	var out bytes.Buffer
+	writeRunReceipt(&out, "testimgbox", pol, []byte("agent: x"), "docker", "persisted", 1, 0)
+	path := filepath.Join(os.TempDir(), "runclave-testimgbox-receipt.json")
+	defer os.Remove(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"image"`) || !strings.Contains(string(data), "runclave/all:latest") {
+		t.Fatalf("receipt must record the effective image, got: %s", data)
+	}
+}
+
 // The receipt's egress numbers come from counting the gateway's own decision log.
 func TestCountEgressLines(t *testing.T) {
 	log := "runclave proxy: default-deny CONNECT proxy on 0.0.0.0:8888 (2 domains allowed)\n" +
