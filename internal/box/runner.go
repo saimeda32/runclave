@@ -1,6 +1,7 @@
 package box
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,7 +33,16 @@ func (ExecRunner) RunInteractive(argv []string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	// The shell exiting with a non-zero status (your last command failed, or you ran
+	// `exit 3`) is NOT a provisioning failure - it must not tear the box down. Only a
+	// real spawn/attach failure (docker itself couldn't start) is propagated; docker
+	// prints its own error to the inherited stderr in that case anyway.
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return nil
+	}
+	return err
 }
 
 // DaemonAvailable reports whether a docker daemon is reachable, so the caller can

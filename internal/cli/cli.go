@@ -190,6 +190,14 @@ func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// stdinIsTerminal reports whether stdin is a real terminal, so `docker exec` gets
+// -t only when a pseudo-terminal makes sense (piped/redirected stdin would make
+// `-t` fail). Uses the char-device heuristic to avoid an external terminal dep.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 // githubAppConfigured reports whether all three GitHub App settings are present,
 // which is the signal to auto-start the broker for `runclave .`.
 func githubAppConfigured() bool {
@@ -662,9 +670,17 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// --shell: same box, same egress boundary, same seed - just an interactive shell
-	// in place of the headless agent exec.
+	// in place of the headless agent exec. The shell is the pack's (default sh, which
+	// every base image has); -t is allocated only when stdin is a real terminal.
 	if *shell {
-		lc.SetInteractiveShell("bash")
+		sh := pol.Run.Shell
+		if sh == "" {
+			sh = "sh"
+		}
+		lc.SetInteractiveShell(sh, stdinIsTerminal())
+		if pol.Auth.EnvVar != "" && os.Getenv(pol.Auth.EnvVar) != "" {
+			fmt.Fprintf(stderr, "runclave: note - the shell has the agent's auth token in its environment (%s); anyone at this prompt can read it\n", pol.Auth.EnvVar)
+		}
 	}
 	// Enforce the egress/host invariants BEFORE any execution. Refuse to run a
 	// plan that would open host egress or host-disk access (F1/W6).
@@ -675,7 +691,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "runclave: %s box for %s\n", drv.Name(), filepath.Base(cwd))
 	fmt.Fprintf(stdout, "  workspace: %s\n", ws.Describe())
-	fmt.Fprintf(stdout, "  egress invariants: OK (internal-net-only, --network none, no host escape)\n")
+	fmt.Fprintf(stdout, "  egress invariants: OK (box on the internal net only, egress via gateway, no host escape)\n")
 
 	if *dryRun || !box.DaemonAvailable() {
 		// Honest: report the verified plan, don't pretend to run it.

@@ -9,6 +9,7 @@ run:
   image: runclave/claude-code:latest
   command: claude
   headlessFlags: ["-p"]
+  shell: bash # the claude-code image (node:20-bookworm-slim) ships bash
   # Quiet the box down: no auto-update, no non-essential traffic. Auth is injected
   # separately by the secret broker (see auth.envVar), never baked into the image.
   containerEnv:

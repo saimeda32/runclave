@@ -28,6 +28,10 @@ type Pack struct {
 		// base and add the agent CLI. Empty falls back to the agent-agnostic base
 		// (which has git but not the agent, so the exec will fail).
 		Image string `yaml:"image"`
+		// Shell is the interactive shell `runclave . --shell` runs in this image.
+		// Empty defaults to "sh" (present on alpine/debian/node images); set "bash"
+		// when the image ships it.
+		Shell string `yaml:"shell"`
 	} `yaml:"run"`
 
 	Egress struct {

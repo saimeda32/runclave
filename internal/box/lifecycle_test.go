@@ -469,31 +469,54 @@ func TestGuardCatchesUnsanctionedMount(t *testing.T) {
 func TestInteractiveShellPlan(t *testing.T) {
 	p := buildOK(t)
 	nSteps := len(p.Steps)
-	execEnv := p.Steps[nSteps-1].Env // the agent exec's egress env
-	p.SetInteractiveShell("bash")
+	// Find the agent-exec step up front, so we can prove --shell rewrote THAT one.
+	var execEnv map[string]string
+	execIdx := -1
+	for i, s := range p.Steps {
+		if s.IsAgentExec {
+			execIdx, execEnv = i, s.Env
+		}
+	}
+	if execIdx < 0 {
+		t.Fatal("plan must have an agent-exec step")
+	}
+	if !p.SetInteractiveShell("bash", true) {
+		t.Fatal("SetInteractiveShell must report it rewrote the exec step")
+	}
 	if len(p.Steps) != nSteps {
 		t.Fatalf("--shell must not add or drop steps, got %d want %d", len(p.Steps), nSteps)
 	}
-	last := p.Steps[nSteps-1]
-	if !last.Interactive || len(last.Argv) != 1 || last.Argv[0] != "bash" {
-		t.Fatalf("final step must be an interactive bash, got %+v", last)
+	// The rewritten step is the SAME step that was the agent exec (found by flag).
+	rw := p.Steps[execIdx]
+	if !rw.Interactive || !rw.TTY || len(rw.Argv) != 1 || rw.Argv[0] != "bash" {
+		t.Fatalf("agent-exec step must become an interactive bash, got %+v", rw)
 	}
 	// The shell keeps the same egress env (so it's inside the same boundary + proxy).
-	if last.Env["HTTP_PROXY"] != execEnv["HTTP_PROXY"] || last.Env["HTTP_PROXY"] == "" {
-		t.Fatalf("shell must keep the agent's proxy env, got %v", last.Env)
+	if rw.Env["HTTP_PROXY"] != execEnv["HTTP_PROXY"] || rw.Env["HTTP_PROXY"] == "" {
+		t.Fatalf("shell must keep the agent's proxy env, got %v", rw.Env)
 	}
-	// The plan still satisfies the egress/host invariants.
 	if err := p.VerifyEgressInvariants(); err != nil {
 		t.Fatalf("interactive-shell plan must pass invariants: %v", err)
 	}
-	// It renders as an attached `docker exec -it <box> bash`.
+	// With a TTY it renders as an attached `docker exec -it <box> bash`.
 	r := &fakeRunner{}
 	if err := p.Execute(r); err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(r.calls[len(r.calls)-1], " ")
+	joined := strings.Join(r.calls[execIdx], " ")
 	if !strings.HasPrefix(joined, "docker exec -it ") || !strings.HasSuffix(joined, " bash") {
 		t.Fatalf("shell step must render as `docker exec -it <box> bash`, got %q", joined)
+	}
+	// Without a TTY (piped stdin) it must use -i only, never -t.
+	p2 := buildOK(t)
+	p2.SetInteractiveShell("sh", false)
+	r2 := &fakeRunner{}
+	if err := p2.Execute(r2); err != nil {
+		t.Fatal(err)
+	}
+	last := strings.Join(r2.calls[len(r2.calls)-1], " ")
+	if !strings.Contains(last, "docker exec -i ") || strings.Contains(last, "-it") {
+		t.Fatalf("no-TTY shell must render `docker exec -i` (no -t), got %q", last)
 	}
 }
 

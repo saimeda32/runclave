@@ -40,9 +40,15 @@ type Step struct {
 	// not appear in host `ps`, and out of a rendered/dry-run plan.
 	PassEnv []string
 	// Interactive marks a step that attaches the caller's terminal (a `docker exec
-	// -it` shell). It runs via a Runner that implements InteractiveRunner; a plain
+	// -i[t]` shell). It runs via a Runner that implements InteractiveRunner; a plain
 	// Runner (dry-run/tests) just records the argv.
 	Interactive bool
+	// TTY adds `-t` (allocate a pseudo-terminal). Only set when the caller's stdin is
+	// a real terminal; `docker exec -t` fails outright when stdin is piped/redirected.
+	TTY bool
+	// IsAgentExec marks THE step that runs the agent command, so --shell can find and
+	// rewrite exactly that step instead of assuming it is the last one.
+	IsAgentExec bool
 }
 
 // InteractiveRunner is an optional Runner capability: run a step attached to the
@@ -375,11 +381,12 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 		passEnv = append(passEnv, pack.Auth.EnvVar)
 	}
 	steps = append(steps, Step{
-		Desc:    fmt.Sprintf("exec agent (egress->%s; %s)", proxyAddr, brokerNote),
-		Argv:    execArgv,
-		InBox:   true,
-		Env:     env,
-		PassEnv: passEnv,
+		Desc:        fmt.Sprintf("exec agent (egress->%s; %s)", proxyAddr, brokerNote),
+		Argv:        execArgv,
+		InBox:       true,
+		Env:         env,
+		PassEnv:     passEnv,
+		IsAgentExec: true,
 	})
 	return Plan{Name: name, Net: net, GatewayName: gwName, OutboundNet: outNet, BrokerSock: brokerSock, LoginMounts: loginMounts, LoginHostRoot: loginHostRoot, Allowlist: pack.AllowedDomains(), Steps: steps}, nil
 }
@@ -688,7 +695,13 @@ func (p Plan) Execute(r Runner) error {
 		if s.InBox {
 			wrap := []string{"docker", "exec"}
 			if s.Interactive {
-				wrap = append(wrap, "-it") // attach the terminal for a shell
+				// -i always (attach stdin); -t only with a real terminal, since
+				// `docker exec -t` fails when stdin is piped/redirected.
+				if s.TTY {
+					wrap = append(wrap, "-it")
+				} else {
+					wrap = append(wrap, "-i")
+				}
 			}
 			for k, v := range s.Env {
 				wrap = append(wrap, "-e", k+"="+v)
@@ -718,17 +731,24 @@ func (p Plan) Execute(r Runner) error {
 	return nil
 }
 
-// SetInteractiveShell rewrites the final (agent-exec) step into an interactive
-// in-box shell, keeping the same egress/auth env so the shell has the same network
-// boundary and login the agent would. Everything before it - the isolated box, the
+// SetInteractiveShell rewrites the AGENT-EXEC step into an interactive in-box
+// shell, keeping the same egress/auth env so the shell has the same network
+// boundary and login the agent would. Everything else - the isolated box, the
 // gateway, the seed - is unchanged, so `--shell` is the same sandbox, just a prompt
-// instead of a headless agent.
-func (p *Plan) SetInteractiveShell(shell string) {
-	if len(p.Steps) == 0 {
-		return
+// instead of a headless agent. tty says whether to allocate a pseudo-terminal (only
+// when the caller's stdin is a real terminal). It finds the step by IsAgentExec, not
+// by position, so a future post-exec step could not be turned into the shell by
+// mistake. Returns false if there is no agent-exec step.
+func (p *Plan) SetInteractiveShell(shell string, tty bool) bool {
+	for i := range p.Steps {
+		if p.Steps[i].IsAgentExec {
+			s := &p.Steps[i]
+			s.Desc = "interactive shell (" + shell + ")"
+			s.Argv = []string{shell}
+			s.Interactive = true
+			s.TTY = tty
+			return true
+		}
 	}
-	last := &p.Steps[len(p.Steps)-1]
-	last.Desc = "interactive shell (" + shell + ")"
-	last.Argv = []string{shell}
-	last.Interactive = true
+	return false
 }
