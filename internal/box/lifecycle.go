@@ -272,9 +272,9 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// The egress-proxy GATEWAY runs the allowlist CONNECT proxy (`runclave proxy`)
 	// and straddles two nets: the internal sandbox-net (to receive the box's
 	// traffic) and outNet (to reach the internet). The box has NO route except
-	// through this gateway -> the box's only egress is the allowlist proxy.
-	// NOTE (honest): the gateway image `runclave/gateway` (the runclave binary in a
-	// minimal image) is not built here - that Dockerfile is a remaining stub.
+	// through this gateway -> the box's only egress is the allowlist proxy. The
+	// gateway image (runclave/gateway, `make gateway-image`) is the runclave binary
+	// in distroless/static running `runclave proxy`; a real run brings it up.
 	gwAllow := strings.Join(pack.AllowedDomains(), ",")
 	// Provisioning pattern (reworked after a real run: Docker refuses to
 	// `network connect` a container created with `--network none`). The --internal

@@ -34,11 +34,11 @@ What's built and tested:
 - a Claude Code box image with the CLI baked in
 - passing the agent's auth token into the box by name (never on an argv)
 - the opt-in `--login` mount that reuses your existing host login
-- the git credential broker daemon and its in-box helper
+- the git credential broker daemon and its in-box helper, auto-started by `runclave .` on a per-session socket
 
 What's still in progress, stated honestly rather than glossed:
 
-- auto-starting the broker from `runclave .` (today the daemon is a separate command; the socket location across operating systems is the open piece)
+- verifying the broker socket bind-mount end to end on the macOS Docker VM (it works on native Linux docker; the path resolution is settled on both)
 - box images for agents other than Claude Code
 - the Apple `container` backend on macOS and the bubblewrap backend on Linux
 - reading real allow and deny counts out of the gateway log (the receipt records them as unknown until then)
