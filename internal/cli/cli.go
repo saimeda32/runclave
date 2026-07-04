@@ -190,6 +190,36 @@ func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// gatewayEgressCounts reads the gateway container's log and counts the ALLOW/DENY
+// decisions the proxy made, so the receipt carries real egress numbers instead of
+// "unknown". Returns -1,-1 if the log can't be read (then the receipt stays honest
+// about not knowing). The proxy logs one "egress ALLOW <host>" / "egress DENY
+// <host>" line per decision.
+func gatewayEgressCounts(gwName string) (int64, int64) {
+	if gwName == "" {
+		return -1, -1
+	}
+	out, err := exec.Command("docker", "logs", gwName).CombinedOutput()
+	if err != nil {
+		return -1, -1
+	}
+	return countEgressLines(string(out))
+}
+
+// countEgressLines tallies the proxy's ALLOW/DENY decision lines from its log.
+func countEgressLines(log string) (int64, int64) {
+	var allow, deny int64
+	for _, line := range strings.Split(log, "\n") {
+		switch {
+		case strings.Contains(line, "egress ALLOW"):
+			allow++
+		case strings.Contains(line, "egress DENY"):
+			deny++
+		}
+	}
+	return allow, deny
+}
+
 // stdinIsTerminal reports whether stdin is a real terminal, so `docker exec` gets
 // -t only when a pseudo-terminal makes sense (piped/redirected stdin would make
 // `-t` fail). Uses the char-device heuristic to avoid an external terminal dep.
@@ -710,7 +740,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintf(stdout, "  git broker: would serve short-lived tokens on %s (daemon not started for a dry run)\n", brokerSock)
 		}
-		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned", loginShared...)
+		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned", -1, -1, loginShared...)
 		return 0
 	}
 
@@ -724,7 +754,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		// Best-effort teardown so a half-provisioned box and its network don't
 		// linger and block the next run on a name collision.
 		_ = lc.Destroy(box.ExecRunner{})
-		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", loginShared...)
+		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", -1, -1, loginShared...)
 		return 1
 	}
 	if *shell {
@@ -738,7 +768,13 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		// later, git is not brokered until you run through runclave again.
 		fmt.Fprintf(stdout, "  git broker: served this run; stops now (box persists without it)\n")
 	}
-	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", loginShared...)
+	// Real egress counts from the gateway's own log (the box's only route out), so
+	// the receipt reports what actually happened instead of "unknown".
+	egAllow, egDeny := gatewayEgressCounts(lc.GatewayName)
+	if egAllow >= 0 {
+		fmt.Fprintf(stdout, "  egress: %d allowed, %d denied (from the gateway log)\n", egAllow, egDeny)
+	}
+	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", egAllow, egDeny, loginShared...)
 	return 0
 }
 
@@ -825,14 +861,14 @@ func buildLoginMounts(pol *policy.Pack, want bool, stderr io.Writer) ([]box.Logi
 // writeRunReceipt emits the A3 run receipt: the effective boundary + disposition,
 // separate from any transcript. Egress allow/deny counts live in the gateway
 // container's logs (not host-visible yet) - recorded honestly as -1/unknown here.
-func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []byte, backend, disposition string, loginShared ...string) {
+func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []byte, backend, disposition string, egressAllow, egressDeny int64, loginShared ...string) {
 	r := ledger.Receipt{
 		Agent:         pol.Agent,
 		PolicyHash:    ledger.PolicyHash(rawPol),
 		Backend:       backend,
 		AllowedEgress: pol.AllowedDomains(),
-		EgressAllowed: -1, // -1 = not host-visible (gateway-side); honest, not faked 0
-		EgressDenied:  -1,
+		EgressAllowed: egressAllow, // -1 when not read (planned/failed); real counts from the gateway log on a persisted run
+		EgressDenied:  egressDeny,
 		LoginShared:   loginShared,
 		Disposition:   disposition,
 	}

@@ -163,6 +163,22 @@ func TestSessionBrokerSocket(t *testing.T) {
 	}
 }
 
+// The receipt's egress numbers come from counting the gateway's own decision log.
+func TestCountEgressLines(t *testing.T) {
+	log := "runclave proxy: default-deny CONNECT proxy on 0.0.0.0:8888 (2 domains allowed)\n" +
+		"egress ALLOW api.anthropic.com:443\n" +
+		"egress DENY evil.example.com:443\n" +
+		"egress ALLOW claude.ai:443\n" +
+		"some unrelated line\n"
+	allow, deny := countEgressLines(log)
+	if allow != 2 || deny != 1 {
+		t.Fatalf("got allow=%d deny=%d, want 2 and 1", allow, deny)
+	}
+	if a, d := countEgressLines(""); a != 0 || d != 0 {
+		t.Fatalf("empty log must be 0,0, got %d,%d", a, d)
+	}
+}
+
 // A missing login file is skipped with a note, not an error (you're just not
 // logged in on this machine).
 func TestBuildLoginMountsSkipsMissing(t *testing.T) {
