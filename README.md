@@ -158,18 +158,26 @@ A daemon on your host, `runclave brokerd`, holds the real secret (a GitHub App p
 
 Authorization is decided on the host. The daemon mints a token only for the repo the session was created for, and it ignores whatever repo the box asks for in the request, logging any mismatch. A compromised box can't talk the daemon into credentials for a different repo, because the box's claimed identity is never trusted for the decision.
 
-To run the daemon you configure a GitHub App and point the daemon at the per-session socket:
+To use it, configure a GitHub App and export its three settings:
 
 ```sh
 export RUNCLAVE_GH_APP_ID=...
 export RUNCLAVE_GH_INSTALLATION_ID=...
 export RUNCLAVE_GH_PRIVATE_KEY=/path/to/app-private-key.pem
-runclave brokerd --socket /run/runclave/<session>.sock --repo github.com/you/yourrepo
+runclave .
+```
+
+With those set and a `github.com` origin on the repo, `runclave .` starts the daemon for you: it derives the repo from the origin, creates a per-session socket in a runclave-owned, owner-only directory under your runtime or cache dir (`$XDG_RUNTIME_DIR/runclave/...` on Linux, `~/Library/Caches/runclave/...` on macOS, no root and no `/run` needed), mounts it read-only into the box, and stops the daemon and removes the socket when the run ends. If the App isn't configured, or the repo has no github origin, the run just proceeds without brokered git and says so.
+
+You can also run the daemon yourself, for example to serve a longer-lived box:
+
+```sh
+runclave brokerd --socket "$XDG_RUNTIME_DIR/runclave/mybox/broker.sock" --repo github.com/you/yourrepo
 ```
 
 The daemon creates the socket owner-only, refuses to touch a path that isn't a socket, and fails closed: if the App isn't configured, it mints nothing rather than falling back to a long-lived secret. The tokens it mints carry an expiry, so git rotates them on its own.
 
-One honest note: `runclave .` doesn't start this daemon for you yet. The broker, the in-box helper, and the git wiring are all built and tested, but auto-starting the daemon and settling where the socket lives across operating systems is the next step. Until then the broker is a working piece you run yourself.
+Two honest limits. First, the auto-started daemon lives for the duration of the run: it serves the agent's git while the run is active and stops on return, so a box you re-enter later is not brokered until you go through `runclave` again. Second, the socket location is settled for both operating systems, but bind-mounting a host unix socket into the box on the macOS Docker VM crosses the VM's file-sharing layer and isn't verified here; on native Linux docker it works. So treat macOS end-to-end brokering as unproven for now, not as a promise.
 
 ## Policy packs
 

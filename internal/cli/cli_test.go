@@ -106,11 +106,13 @@ func TestBuildLoginMountsRejectsOutsideHome(t *testing.T) {
 // returns "" (skip brokering) when there is no github origin.
 func TestDeriveRepo(t *testing.T) {
 	cases := map[string]string{
-		"git@github.com:owner/name.git":       "github.com/owner/name",
-		"https://github.com/owner/name.git":   "github.com/owner/name",
-		"https://github.com/owner/name":       "github.com/owner/name",
-		"ssh://git@github.com/owner/name.git": "github.com/owner/name",
-		"git@gitlab.com:owner/name.git":       "", // not github
+		"git@github.com:owner/name.git":          "github.com/owner/name",
+		"https://github.com/owner/name.git":      "github.com/owner/name",
+		"https://github.com/owner/name":          "github.com/owner/name",
+		"ssh://git@github.com/owner/name.git":    "github.com/owner/name",
+		"ssh://git@github.com:22/owner/name.git": "github.com/owner/name", // port dropped, not folded into scope
+		"git@gitlab.com:owner/name.git":          "",                      // not github
+		"git@github.com.evil.com:owner/name.git": "",                      // look-alike host rejected
 	}
 	for url, want := range cases {
 		dir := t.TempDir()

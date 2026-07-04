@@ -9,10 +9,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -193,35 +196,55 @@ func githubAppConfigured() bool {
 		os.Getenv("RUNCLAVE_GH_PRIVATE_KEY") != ""
 }
 
-// deriveRepo turns the repo's origin remote into the "host/owner/name" scope the
-// broker mints for. Returns "" (not an error) when there is no origin, so the
-// caller can simply skip brokering. Only github.com is supported today.
+// deriveRepo turns the repo's origin remote into the "github.com/owner/name" scope
+// the broker mints for. Returns "" (not an error) when there is no usable github
+// origin, so the caller simply skips brokering. Only github.com is supported today.
+// Parsing is exact: the host must be exactly github.com (any port or userinfo is
+// dropped, and a look-alike like github.com.evil.com is rejected), and the path
+// must be exactly owner/name - so a crafted origin can never mint for a scope the
+// user did not intend; the worst case is "" (skip).
 func deriveRepo(cwd string) string {
 	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "origin").Output()
 	if err != nil {
 		return ""
 	}
-	url := strings.TrimSpace(string(out))
-	url = strings.TrimSuffix(url, ".git")
-	// git@github.com:owner/name  ->  github.com/owner/name
-	if i := strings.Index(url, "@"); i >= 0 {
-		url = url[i+1:]
-		url = strings.Replace(url, ":", "/", 1)
-	}
-	// https://github.com/owner/name or ssh://github.com/owner/name -> strip scheme
-	if i := strings.Index(url, "://"); i >= 0 {
-		url = url[i+3:]
-	}
-	if !strings.HasPrefix(url, "github.com/") || strings.Count(url, "/") < 2 {
+	raw := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
+	var host, path string
+	switch {
+	case strings.Contains(raw, "://"):
+		u, perr := url.Parse(raw)
+		if perr != nil {
+			return ""
+		}
+		host = u.Hostname() // drops any :port and user@
+		path = u.Path
+	case strings.Contains(raw, ":"):
+		// scp-like: [user@]github.com:owner/name
+		hostpart, p, _ := strings.Cut(raw, ":")
+		if at := strings.LastIndex(hostpart, "@"); at >= 0 {
+			hostpart = hostpart[at+1:]
+		}
+		host, path = hostpart, p
+	default:
 		return ""
 	}
-	return url
+	if host != "github.com" {
+		return ""
+	}
+	path = strings.Trim(path, "/")
+	if path == "" || strings.Count(path, "/") != 1 {
+		return "" // must be exactly owner/name
+	}
+	return "github.com/" + path
 }
 
 // sessionBrokerSocket returns a per-session socket path inside a runclave-owned,
-// owner-only directory under the user's runtime or cache dir. This is the
-// cross-OS answer to "where does the socket live": no root or /run needed. Returns
-// the socket path and a cleanup that removes the session dir.
+// owner-only directory under the user's runtime or cache dir. This resolves where
+// the socket LIVES across operating systems (no root or /run needed). Caveat kept
+// honest: on the macOS Docker VM, bind-mounting a HOST unix socket into the box
+// crosses the VM's file-sharing layer and is not verified here; it works on native
+// Linux docker. So this settles the path, not a proven macOS end-to-end mount.
+// Returns the socket path and a cleanup that removes the session dir.
 func sessionBrokerSocket(name string) (string, func(), error) {
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
@@ -249,21 +272,37 @@ func startBrokerd(sock, repo string, stderr io.Writer) (func(), error) {
 		return nil, err
 	}
 	cmd := exec.Command(exe, "brokerd", "--socket", sock, "--repo", repo)
-	cmd.Env = os.Environ() // carry the RUNCLAVE_GH_* config to the daemon
+	// Hand the child ONLY what brokerd needs: the App config plus PATH. Passing the
+	// whole environment would needlessly give the daemon the agent's own token etc.
+	// The private key is a file PATH here; brokerd reads it on the host, never argv.
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"RUNCLAVE_GH_APP_ID=" + os.Getenv("RUNCLAVE_GH_APP_ID"),
+		"RUNCLAVE_GH_INSTALLATION_ID=" + os.Getenv("RUNCLAVE_GH_INSTALLATION_ID"),
+		"RUNCLAVE_GH_PRIVATE_KEY=" + os.Getenv("RUNCLAVE_GH_PRIVATE_KEY"),
+	}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	stop := func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
-	// Poll for the socket, and bail if the daemon dies first.
+	// One goroutine owns Wait (reaps the child); stop() only signals it to exit.
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	stop := func() { _ = cmd.Process.Kill() }
+	// Wait for the socket to appear, but bail immediately if the daemon exits first
+	// (a bad key path/format makes brokerd fail closed before it ever listens).
 	for i := 0; i < 40; i++ {
 		if _, statErr := os.Stat(sock); statErr == nil {
 			return stop, nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-exited:
+			return nil, fmt.Errorf("broker daemon exited before it was ready (check the GitHub App config)")
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	stop()
-	return nil, fmt.Errorf("broker daemon did not come up (check the GitHub App config)")
+	return nil, fmt.Errorf("broker daemon did not come up in time")
 }
 
 // githubAppMinterFromEnv builds the production minter from the operator's
@@ -548,7 +587,28 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
 		return 1
 	}
-	defer os.RemoveAll(seedDir)
+	// Host-side cleanups run on normal return AND on Ctrl-C. Go does not run defers
+	// on a signal, so without this an interrupted run would leave the seed dir and
+	// the broker socket dir behind. (The detached box is intentionally persistent;
+	// tear a lingering one down with `runclave destroy`.)
+	var cleanupOnce sync.Once
+	var cleanups []func()
+	runCleanups := func() {
+		cleanupOnce.Do(func() {
+			for i := len(cleanups) - 1; i >= 0; i-- {
+				cleanups[i]()
+			}
+		})
+	}
+	defer runCleanups()
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigc
+		runCleanups()
+		os.Exit(130)
+	}()
+	cleanups = append(cleanups, func() { _ = os.RemoveAll(seedDir) })
 	bundle, dirty, untracked, err := workspace.CreateSeedArtifacts(cwd, seedDir, !*clean, hostRun)
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
@@ -580,14 +640,16 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "runclave: broker: %v; running without brokered git\n", serr)
 		} else if *dryRun {
 			brokerSock = sock // show the mount in the plan; don't spawn a daemon
-			defer cleanup()
+			cleanups = append(cleanups, cleanup)
 		} else if stop, berr := startBrokerd(sock, repo, stderr); berr != nil {
 			fmt.Fprintf(stderr, "runclave: broker: %v; running without brokered git\n", berr)
 			cleanup()
 		} else {
 			brokerSock = sock
-			fmt.Fprintf(stderr, "runclave: broker: serving short-lived tokens for %s\n", repo)
-			defer func() { stop(); cleanup() }()
+			// It's up and listening; tokens are minted per request (a wrong App or
+			// missing repo access would surface only then, and git falls back).
+			fmt.Fprintf(stderr, "runclave: broker: up for %s (short-lived tokens, minted on demand)\n", repo)
+			cleanups = append(cleanups, func() { stop(); cleanup() })
 		}
 	}
 	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot)
@@ -637,11 +699,13 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", loginShared...)
 		return 1
 	}
-	brokerNote := "git broker off"
+	fmt.Fprintf(stdout, "  box up (egress via gateway proxy)\n")
 	if brokerSock != "" {
-		brokerNote = "git broker on (short-lived tokens over the session socket)"
+		// Honest lifetime: the broker served the agent's git DURING this run and
+		// stops now, on return. The box is detached and persists; if you re-enter it
+		// later, git is not brokered until you run through runclave again.
+		fmt.Fprintf(stdout, "  git broker: served this run; stops now (box persists without it)\n")
 	}
-	fmt.Fprintf(stdout, "  box up (egress via gateway proxy; %s)\n", brokerNote)
 	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", loginShared...)
 	return 0
 }
