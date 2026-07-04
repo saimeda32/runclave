@@ -1,0 +1,56 @@
+# Gemini CLI policy pack - the second agent, proving the model is agent-neutral.
+# Facts grounded by running the CLI in a container (v0.49.0): command `gemini`,
+# `-p/--prompt` is non-interactive/headless, `GEMINI_API_KEY` (or a Google login in
+# ~/.gemini) is the auth, and it complains to set one of GEMINI_API_KEY /
+# GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_GCA when none is present.
+# This file is DATA, not code (criterion P4): no executable hooks.
+agent: gemini-cli
+scope: local
+type: cli-headless
+
+run:
+  image: runclave/gemini-cli:latest
+  command: gemini
+  # --yolo: auto-approve tool actions. Safe here because the BOX is the boundary
+  # (same rationale as disabling the agent's own sandbox below); -p is headless.
+  headlessFlags: ["--yolo", "-p"]
+  shell: bash # the gemini-cli image (node:20-bookworm-slim) ships bash
+
+egress:
+  # model/auth endpoints - allow (criterion E7)
+  model:
+    - generativelanguage.googleapis.com # Gemini API, the GEMINI_API_KEY path
+    - cloudcode-pa.googleapis.com        # Code Assist, the Google-login (GCA) path
+  # infra: OAuth token refresh for the Google-login path
+  infra:
+    - oauth2.googleapis.com
+    - accounts.google.com
+
+auth:
+  # API-key via env is the cleanest bridge; a Google login under ~/.gemini is the
+  # opt-in --login alternative.
+  method: env-token
+  envVar: GEMINI_API_KEY
+  deviceFlow: false
+  # Opt-in only (runclave . --login): where Gemini CLI keeps its settings and Google
+  # login on the host, mounted read-only. Sharing hands the box a long-lived
+  # credential; a scoped GEMINI_API_KEY via envVar is preferred.
+  loginPaths:
+    - "~/.gemini"
+
+paths:
+  # Deny-read hotspot (criterion S5): the OAuth creds file, on top of absence.
+  credentialHotspots:
+    - "~/.gemini/oauth_creds.json"
+
+mcp:
+  configPath: "~/.gemini/settings.json"
+  # Never auto-trust a repo-provided MCP config (criterion P5).
+  consentPolicy: outside-repo
+
+nativeSandbox:
+  # Gemini CLI has its own --sandbox (GEMINI_SANDBOX), but inside our box WE own
+  # isolation. Disable it to avoid nested-sandbox failure modes; the box is the
+  # boundary.
+  mode: disable
+  disableFlag: ""

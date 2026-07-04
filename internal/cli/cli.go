@@ -42,6 +42,7 @@ Usage:
   runclave credential <op>   in-box git credential helper (talks to the broker; not run by hand)
 
 Flags:
+  --agent <name>     which agent policy pack to run (default claude-code; e.g. gemini-cli)
   --backend <name>   force a backend (apple-container | docker); default: strongest available
   --clean            clone HEAD only, without uncommitted working-tree changes
   --shell            drop into an interactive shell in the box instead of running
@@ -574,6 +575,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "print the verified lifecycle plan without executing it")
 	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
 	shell := fs.Bool("shell", false, "drop into an interactive shell in the box instead of running the agent (same isolation and egress boundary)")
+	agent := fs.String("agent", "claude-code", "which agent policy pack to run (e.g. claude-code, gemini-cli)")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -604,12 +606,12 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 
 	dir := policiesDir(fs)
 	warnIfLocalPacks(dir, stderr)
-	pol, err := policy.Find(dir, "claude-code")
+	pol, err := policy.Find(dir, *agent)
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
 		return 1
 	}
-	rawPol, _ := policy.RawBytes(dir, "claude-code")
+	rawPol, _ := policy.RawBytes(dir, *agent)
 
 	// Interim auth: if the pack names an auth env var, the exec step passes it to the
 	// box BY NAME (`docker exec -e NAME`), so docker reads the value from runclave's
