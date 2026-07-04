@@ -1,0 +1,27 @@
+# Combined box image: the runclave base plus EVERY supported agent CLI, so one
+# image can run any agent (pick it with `runclave . --agent <name> --image
+# runclave/all:latest`). This is the opt-in convenience image; the default is the
+# per-agent minimal image, which keeps each box's supply-chain surface small.
+#
+# Trade-off, stated honestly: a box booted from this image carries all agents'
+# dependency trees even when you run only one. It is still contained the same way -
+# no host filesystem, egress limited to the selected agent's allowlist - but the
+# code surface inside the box is larger than a single-agent image.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o /runclave ./cmd/runclave
+
+FROM node:20-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code @google/gemini-cli \
+    && useradd -u 10001 -m runclave \
+    && mkdir -p /seed /run/runclave && chown 10001:10001 /seed /run/runclave
+COPY --from=build /runclave /usr/local/bin/runclave
+USER 10001
+WORKDIR /home/runclave
+CMD ["sleep", "infinity"]

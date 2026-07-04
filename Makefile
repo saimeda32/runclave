@@ -1,4 +1,4 @@
-.PHONY: build test vet images gateway-image base-image claude-image gemini-image
+.PHONY: build test vet images gateway-image base-image claude-image gemini-image all-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o runclave ./cmd/runclave
@@ -26,3 +26,8 @@ claude-image:
 # The gemini-cli pack's box image (base plus the Gemini CLI).
 gemini-image:
 	docker build -f docker/Dockerfile.gemini-cli -t runclave/gemini-cli:latest .
+
+# Opt-in combined image: every agent CLI in one box (runclave . --image runclave/all).
+# NOT part of `make images` - the default stays minimal per-agent.
+all-image:
+	docker build -f docker/Dockerfile.all -t runclave/all:latest .

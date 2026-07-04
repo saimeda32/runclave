@@ -55,16 +55,25 @@ What's still in progress, stated honestly rather than glossed:
 git clone https://github.com/saimeda32/runclave
 cd runclave
 make build     # builds the ./runclave binary
-make images    # builds the container images: base, gateway, claude-code
+make images    # builds the container images: base, gateway, and the per-agent images
 ```
 
-`make images` builds three images:
+`make images` builds:
 
 - `runclave/base` is the workspace base (git plus the runclave binary, non-root).
 - `runclave/gateway` runs the allowlist proxy.
-- `runclave/claude-code` is the base plus the Claude Code CLI, so the box needs no network to install the agent.
+- `runclave/claude-code` and `runclave/gemini-cli` are the base plus one agent CLI each, so the box needs no network to install the agent.
 
 You only need to run `make images` once per machine, or again after you change a Dockerfile.
+
+Images are per-agent by default, which keeps each box's contents to the one agent you're running. If you would rather have a single image that carries every agent CLI and switch between them, build the combined image and point `--image` at it:
+
+```sh
+make all-image                                          # builds runclave/all with every agent CLI
+runclave . --agent gemini-cli --image runclave/all:latest
+```
+
+The combined image is purely a convenience: the egress allowlist and the isolation come from the selected agent's policy, not the image, so running Claude in the combined image still only reaches Anthropic's hosts. The trade-off is that a box booted from it carries every agent's dependencies, even the ones you are not using, which is why the slim per-agent images are the default.
 
 ## Quick start
 

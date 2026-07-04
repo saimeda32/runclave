@@ -43,6 +43,8 @@ Usage:
 
 Flags:
   --agent <name>     which agent policy pack to run (default claude-code; e.g. gemini-cli)
+  --image <ref>      override the box image (e.g. runclave/all, the combined image with
+                     every agent CLI); default is the agent's own minimal image
   --backend <name>   force a backend (apple-container | docker); default: strongest available
   --clean            clone HEAD only, without uncommitted working-tree changes
   --shell            drop into an interactive shell in the box instead of running
@@ -576,6 +578,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
 	shell := fs.Bool("shell", false, "drop into an interactive shell in the box instead of running the agent (same isolation and egress boundary)")
 	agent := fs.String("agent", "claude-code", "which agent policy pack to run (e.g. claude-code, gemini-cli)")
+	image := fs.String("image", "", "override the box image (e.g. runclave/all:latest, the combined image with every agent CLI); default is the agent's own minimal image")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -612,6 +615,15 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	rawPol, _ := policy.RawBytes(dir, *agent)
+
+	// --image override: run this agent in a different box image (e.g. the combined
+	// runclave/all image that carries every agent CLI). The egress allowlist and all
+	// invariants are unchanged - only which image the box boots from. The agent's own
+	// command still comes from the pack, so the image just has to contain that CLI.
+	if *image != "" {
+		pol.Run.Image = *image
+		fmt.Fprintf(stderr, "runclave: box image overridden to %s (egress + isolation unchanged)\n", *image)
+	}
 
 	// Interim auth: if the pack names an auth env var, the exec step passes it to the
 	// box BY NAME (`docker exec -e NAME`), so docker reads the value from runclave's
