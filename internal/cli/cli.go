@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/saimeda/runclave/internal/backend"
 	"github.com/saimeda/runclave/internal/box"
@@ -182,6 +183,87 @@ func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// githubAppConfigured reports whether all three GitHub App settings are present,
+// which is the signal to auto-start the broker for `runclave .`.
+func githubAppConfigured() bool {
+	return os.Getenv("RUNCLAVE_GH_APP_ID") != "" &&
+		os.Getenv("RUNCLAVE_GH_INSTALLATION_ID") != "" &&
+		os.Getenv("RUNCLAVE_GH_PRIVATE_KEY") != ""
+}
+
+// deriveRepo turns the repo's origin remote into the "host/owner/name" scope the
+// broker mints for. Returns "" (not an error) when there is no origin, so the
+// caller can simply skip brokering. Only github.com is supported today.
+func deriveRepo(cwd string) string {
+	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(string(out))
+	url = strings.TrimSuffix(url, ".git")
+	// git@github.com:owner/name  ->  github.com/owner/name
+	if i := strings.Index(url, "@"); i >= 0 {
+		url = url[i+1:]
+		url = strings.Replace(url, ":", "/", 1)
+	}
+	// https://github.com/owner/name or ssh://github.com/owner/name -> strip scheme
+	if i := strings.Index(url, "://"); i >= 0 {
+		url = url[i+3:]
+	}
+	if !strings.HasPrefix(url, "github.com/") || strings.Count(url, "/") < 2 {
+		return ""
+	}
+	return url
+}
+
+// sessionBrokerSocket returns a per-session socket path inside a runclave-owned,
+// owner-only directory under the user's runtime or cache dir. This is the
+// cross-OS answer to "where does the socket live": no root or /run needed. Returns
+// the socket path and a cleanup that removes the session dir.
+func sessionBrokerSocket(name string) (string, func(), error) {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		c, err := os.UserCacheDir()
+		if err != nil {
+			return "", nil, fmt.Errorf("cannot find a runtime/cache dir for the broker socket: %w", err)
+		}
+		base = c
+	}
+	dir := filepath.Join(base, "runclave", name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, err
+	}
+	sock := filepath.Join(dir, "broker.sock")
+	return sock, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// startBrokerd launches `runclave brokerd` as a child on the given socket, waits
+// briefly for the socket to appear, and returns a stop func. If the daemon exits
+// early (e.g. a misconfigured App), it returns an error so the caller runs without
+// brokered git rather than mounting a dead socket.
+func startBrokerd(sock, repo string, stderr io.Writer) (func(), error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "brokerd", "--socket", sock, "--repo", repo)
+	cmd.Env = os.Environ() // carry the RUNCLAVE_GH_* config to the daemon
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	stop := func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
+	// Poll for the socket, and bail if the daemon dies first.
+	for i := 0; i < 40; i++ {
+		if _, statErr := os.Stat(sock); statErr == nil {
+			return stop, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stop()
+	return nil, fmt.Errorf("broker daemon did not come up (check the GitHub App config)")
 }
 
 // githubAppMinterFromEnv builds the production minter from the operator's
@@ -484,10 +566,31 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	for _, m := range loginMounts {
 		loginShared = append(loginShared, m.HostPath)
 	}
-	// Broker socket is not mounted yet: the host-side broker daemon that creates
-	// the socket isn't auto-started by this path yet. Passing "" omits the mount so
-	// the box comes up; git-credential brokering lands when auto-start does.
-	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", "", !*clean, loginMounts, loginHostRoot)
+	// Git brokering: if a GitHub App is configured and the repo has a github origin,
+	// auto-start `runclave brokerd` on a per-session, user-owned socket and mount it,
+	// so the box's git gets short-lived tokens and no long-lived secret enters it. If
+	// the App isn't configured, or there's no origin, we simply run without it. On a
+	// --dry-run we show the mount but don't spawn a daemon.
+	brokerSock := ""
+	if githubAppConfigured() {
+		repo := deriveRepo(cwd)
+		if repo == "" {
+			fmt.Fprintf(stderr, "runclave: broker: no github.com origin remote, running without brokered git\n")
+		} else if sock, cleanup, serr := sessionBrokerSocket(name); serr != nil {
+			fmt.Fprintf(stderr, "runclave: broker: %v; running without brokered git\n", serr)
+		} else if *dryRun {
+			brokerSock = sock // show the mount in the plan; don't spawn a daemon
+			defer cleanup()
+		} else if stop, berr := startBrokerd(sock, repo, stderr); berr != nil {
+			fmt.Fprintf(stderr, "runclave: broker: %v; running without brokered git\n", berr)
+			cleanup()
+		} else {
+			brokerSock = sock
+			fmt.Fprintf(stderr, "runclave: broker: serving short-lived tokens for %s\n", repo)
+			defer func() { stop(); cleanup() }()
+		}
+	}
+	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot)
 	if err != nil {
 		// Non-docker driver etc. - report honestly, don't fake a run.
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
@@ -516,7 +619,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		for _, line := range splitLines(dr.Rendered()) {
 			fmt.Fprintf(stdout, "    %s\n", line)
 		}
-		fmt.Fprintf(stdout, "  NOT YET WIRED: broker socket mount. Images are defined (docker/Dockerfile.{base,gateway,claude-code}); run `make images` once before a real run.\n")
+		if brokerSock == "" {
+			fmt.Fprintf(stdout, "  git broker: off (set RUNCLAVE_GH_APP_ID/INSTALLATION_ID/PRIVATE_KEY and add a github origin to enable). Images: run `make images` once before a real run.\n")
+		} else {
+			fmt.Fprintf(stdout, "  git broker: would serve short-lived tokens on %s (daemon not started for a dry run)\n", brokerSock)
+		}
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned", loginShared...)
 		return 0
 	}
@@ -530,7 +637,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", loginShared...)
 		return 1
 	}
-	fmt.Fprintf(stdout, "  box up (egress via gateway proxy). NOT YET WIRED: broker socket mount\n")
+	brokerNote := "git broker off"
+	if brokerSock != "" {
+		brokerNote = "git broker on (short-lived tokens over the session socket)"
+	}
+	fmt.Fprintf(stdout, "  box up (egress via gateway proxy; %s)\n", brokerNote)
 	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", loginShared...)
 	return 0
 }

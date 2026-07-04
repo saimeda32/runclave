@@ -15,6 +15,7 @@ package box
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/saimeda/runclave/internal/backend"
@@ -57,18 +58,21 @@ type Plan struct {
 // git credential-helper shim talks to the host broker over this socket.
 const brokerDst = "/run/runclave/broker.sock"
 
-// brokerSockPrefix is the runclave-owned directory the broker socket MUST live
-// under. The exception is granted only for sockets here - a mount of any other
-// host path (/, /etc, …) is never eligible, so the boundary is enforced, not
-// merely assumed from the caller's constant.
-const brokerSockPrefix = "/run/runclave/"
-
 // validBrokerSock enforces that the exception's source is a genuine, safe socket
 // path, not any host path a future flag or config might supply. Without this the
 // mount shape is validated tightly but the source is trusted, so src=/ would be
 // stripped and hidden from the host-escape check. This is the missing floor.
+//
+// The socket must be a `.sock` inside a runclave-OWNED directory (a path element
+// named "runclave" or "runclave-*"), with no traversal or option-smuggling. It is
+// deliberately NOT pinned to /run/runclave/, because that needs root on mac/linux;
+// a per-session socket under the user's runtime or cache dir (e.g.
+// $XDG_RUNTIME_DIR/runclave/<s>.sock) is equally valid and needs no privilege. The
+// "runclave-owned dir" element is the floor: an arbitrary host path like /etc or
+// ~/.ssh/id_rsa has neither the .sock suffix nor a runclave dir, so it can never
+// become the stripped exception.
 func validBrokerSock(sock string) bool {
-	if sock == "" {
+	if sock == "" || !filepath.IsAbs(sock) {
 		return false
 	}
 	if !strings.HasSuffix(sock, ".sock") { // must be a socket, not a dir
@@ -77,7 +81,12 @@ func validBrokerSock(sock string) bool {
 	if strings.ContainsAny(sock, ",") || strings.Contains(sock, "..") { // no option/traversal smuggling
 		return false
 	}
-	return strings.HasPrefix(sock, brokerSockPrefix) // runclave-owned location only
+	for _, seg := range strings.Split(filepath.Dir(sock), string(filepath.Separator)) {
+		if seg == "runclave" || strings.HasPrefix(seg, "runclave-") {
+			return true // inside a runclave-owned directory
+		}
+	}
+	return false
 }
 
 // allowedBrokerMountSpec is the ONE --mount the box provision step may carry. A
@@ -228,7 +237,7 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// Fail-closed: a broker socket, if given, must be a genuine .sock under the
 	// runclave-owned prefix - never an arbitrary host path.
 	if brokerSock != "" && !validBrokerSock(brokerSock) {
-		return Plan{}, fmt.Errorf("box: broker socket %q is not a valid runclave socket path (must be a .sock under %s)", brokerSock, brokerSockPrefix)
+		return Plan{}, fmt.Errorf("box: broker socket %q is not a valid runclave socket path (must be a .sock inside a runclave-owned dir)", brokerSock)
 	}
 	// Fail-closed: every requested login mount must pass the floor before we build a
 	// plan that strips it past the host-escape guard. A pack listing `/` or a

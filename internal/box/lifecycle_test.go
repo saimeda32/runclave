@@ -464,6 +464,37 @@ func TestGuardCatchesUnsanctionedMount(t *testing.T) {
 	}
 }
 
+// The broker socket may live in any runclave-OWNED directory (so a per-session
+// socket under the user's runtime/cache dir works without root), but an arbitrary
+// host path is never eligible for the mount exception.
+func TestValidBrokerSock(t *testing.T) {
+	good := []string{
+		"/run/runclave/broker.sock",
+		"/home/u/.cache/runclave/runclave-proj/broker.sock",
+		"/tmp/runclave-abc/broker.sock",
+		"/Users/me/Library/Caches/runclave/box/broker.sock",
+	}
+	for _, s := range good {
+		if !validBrokerSock(s) {
+			t.Fatalf("expected %q to be a valid broker socket", s)
+		}
+	}
+	bad := []string{
+		"",
+		"relative/runclave/x.sock",       // not absolute
+		"/etc/passwd",                    // not a .sock, no runclave dir
+		"/home/u/.ssh/id_rsa.sock",       // .sock but no runclave-owned dir
+		"/run/runclave/../etc/evil.sock", // traversal
+		"/run/runclave/x.sock,dst=/,ro",  // option smuggling
+		"/runclavehack/x.sock",           // dir name is not "runclave"/"runclave-*"
+	}
+	for _, s := range bad {
+		if validBrokerSock(s) {
+			t.Fatalf("expected %q to be REJECTED as a broker socket", s)
+		}
+	}
+}
+
 // When a broker socket is present, the plan points in-box git at the broker
 // credential helper (so a push fetches a short-lived token) and turns on
 // useHttpPath (so the broker can log any repo mismatch). Without a socket, no

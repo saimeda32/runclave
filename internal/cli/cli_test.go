@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,6 +99,65 @@ func TestBuildLoginMountsRejectsOutsideHome(t *testing.T) {
 	var out bytes.Buffer
 	if _, _, err := buildLoginMounts(packWith("/etc/shadow"), true, &out); err == nil {
 		t.Fatal("a login path outside home must be refused")
+	}
+}
+
+// deriveRepo normalizes both git@ and https origins to host/owner/name, and
+// returns "" (skip brokering) when there is no github origin.
+func TestDeriveRepo(t *testing.T) {
+	cases := map[string]string{
+		"git@github.com:owner/name.git":       "github.com/owner/name",
+		"https://github.com/owner/name.git":   "github.com/owner/name",
+		"https://github.com/owner/name":       "github.com/owner/name",
+		"ssh://git@github.com/owner/name.git": "github.com/owner/name",
+		"git@gitlab.com:owner/name.git":       "", // not github
+	}
+	for url, want := range cases {
+		dir := t.TempDir()
+		mustGit(t, dir, "init", "-q")
+		mustGit(t, dir, "remote", "add", "origin", url)
+		if got := deriveRepo(dir); got != want {
+			t.Fatalf("deriveRepo(%q) = %q, want %q", url, got, want)
+		}
+	}
+	// No origin at all -> "".
+	noRemote := t.TempDir()
+	mustGit(t, noRemote, "init", "-q")
+	if got := deriveRepo(noRemote); got != "" {
+		t.Fatalf("deriveRepo with no origin = %q, want empty", got)
+	}
+}
+
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, out)
+	}
+}
+
+// sessionBrokerSocket creates a runclave-owned, owner-only session dir under the
+// user's runtime dir and returns a socket path the box guard will accept.
+func TestSessionBrokerSocket(t *testing.T) {
+	rt := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	sock, cleanup, err := sessionBrokerSocket("runclave-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(sock, ".sock") || !strings.Contains(sock, "/runclave/") {
+		t.Fatalf("socket %q must be a .sock inside a runclave dir", sock)
+	}
+	fi, err := os.Stat(filepath.Dir(sock))
+	if err != nil {
+		t.Fatalf("session dir must exist: %v", err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("session dir must be 0700, got %o", fi.Mode().Perm())
+	}
+	cleanup()
+	if _, err := os.Stat(filepath.Dir(sock)); !os.IsNotExist(err) {
+		t.Fatal("cleanup must remove the session dir")
 	}
 }
 
