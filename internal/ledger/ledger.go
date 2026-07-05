@@ -158,3 +158,25 @@ func WriteReceipt(path string, r Receipt) error {
 	}
 	return os.WriteFile(path, data, 0o600)
 }
+
+// WriteEnvelope writes a signed receipt envelope to path (0600).
+func WriteEnvelope(path string, e Envelope) error {
+	data, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// ReadEnvelope reads a signed receipt envelope from path.
+func ReadEnvelope(path string) (Envelope, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Envelope{}, err
+	}
+	var e Envelope
+	if err := json.Unmarshal(data, &e); err != nil {
+		return Envelope{}, err
+	}
+	return e, nil
+}

@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"io"
@@ -38,6 +40,7 @@ Usage:
   runclave policy <agent>    validate and print an agent policy pack
   runclave export <src> [dst] pull a named artifact out of the box (never automatic)
   runclave destroy <box>     tear down a box (prompts to save /out)
+  runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
   runclave brokerd           host-side credential daemon: lends short-lived, repo-scoped git tokens to a box
   runclave credential <op>   in-box git credential helper (talks to the broker; not run by hand)
 
@@ -86,6 +89,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdCredential(rest, stdout, stderr)
 	case "brokerd":
 		return cmdBrokerd(rest, stdout, stderr)
+	case "verify":
+		return cmdVerify(rest, stdout, stderr)
 	case "export":
 		fmt.Fprintf(stderr, "runclave: %q not yet implemented\n", cmd)
 		return 1
@@ -190,6 +195,67 @@ func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave brokerd: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+// receiptSigningKey loads this machine's Ed25519 receipt-signing key, generating
+// and persisting one (owner-only) on first use. The private key stays on the host;
+// only the public key travels, inside each signed receipt. A load failure is
+// returned so the caller can fall back to an unsigned receipt rather than crash.
+func receiptSigningKey() (ed25519.PrivateKey, error) {
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(cfg, "runclave")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "receipt_ed25519.key")
+	if data, err := os.ReadFile(path); err == nil && len(data) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(data), nil
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, priv, 0o600); err != nil {
+		return nil, err
+	}
+	return priv, nil
+}
+
+// cmdVerify checks a signed receipt envelope offline: the signature must verify
+// against the public key embedded in it (fail-closed on any tamper), and the signer
+// fingerprint is shown so the user can confirm it is a key they trust. It notes when
+// the signer is THIS machine's key.
+func cmdVerify(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: runclave verify <receipt.dsse.json>")
+		return 2
+	}
+	env, err := ledger.ReadEnvelope(args[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave verify: %v\n", err)
+		return 1
+	}
+	r, err := ledger.VerifyEnvelope(env)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave verify: INVALID - %v\n", err)
+		return 1
+	}
+	mine := ""
+	if priv, kerr := receiptSigningKey(); kerr == nil {
+		if env.KeyID == ledger.KeyFingerprint(priv.Public().(ed25519.PublicKey)) {
+			mine = " (this machine's key)"
+		}
+	}
+	fmt.Fprintf(stdout, "OK: signature valid\n")
+	fmt.Fprintf(stdout, "  signer:      %s%s\n", env.KeyID, mine)
+	fmt.Fprintf(stdout, "  agent:       %s\n", r.Agent)
+	fmt.Fprintf(stdout, "  image:       %s\n", r.Image)
+	fmt.Fprintf(stdout, "  disposition: %s\n", r.Disposition)
+	fmt.Fprintf(stdout, "  egress:      %d allowed, %d denied\n", r.EgressAllowed, r.EgressDenied)
 	return 0
 }
 
@@ -897,6 +963,18 @@ func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []b
 	path := filepath.Join(os.TempDir(), "runclave-"+name+"-receipt.json")
 	if err := ledger.WriteReceipt(path, r); err == nil {
 		fmt.Fprintf(stdout, "  receipt: %s (policy %s…, disposition=%s)\n", path, r.PolicyHash[:12], disposition)
+	}
+	// Sign the receipt so it is tamper-evident and offline-verifiable (`runclave
+	// verify`). A signing-key problem is non-fatal: the unsigned receipt still stands.
+	if priv, err := receiptSigningKey(); err == nil {
+		if env, serr := ledger.SignReceipt(r, priv); serr == nil {
+			sigPath := filepath.Join(os.TempDir(), "runclave-"+name+"-receipt.dsse.json")
+			if werr := ledger.WriteEnvelope(sigPath, env); werr == nil {
+				fmt.Fprintf(stdout, "  signed:  %s (%s; verify with `runclave verify %s`)\n", sigPath, env.KeyID, sigPath)
+			}
+		}
+	} else {
+		fmt.Fprintf(stdout, "  (receipt not signed: %v)\n", err)
 	}
 }
 
