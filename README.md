@@ -101,6 +101,7 @@ runclave run <agent>       run a named agent headless
 runclave backends          list detected isolation backends, strongest first
 runclave policy <agent>    validate and print an agent policy pack
 runclave destroy <box>     tear a box down
+runclave verify <receipt>  check a signed receipt (.dsse.json) offline; fails on tamper
 runclave brokerd           host-side git credential daemon (see the broker section)
 runclave credential <op>   in-box git credential helper (runclave runs this for you)
 ```
@@ -235,6 +236,16 @@ The isolation isn't a vibe, it's checked before anything runs. `runclave .` buil
 - no step hands the box a path to the host disk
 
 The last one has two sanctioned exceptions, and only two: the broker's unix socket (an IPC endpoint, not a filesystem tree) and, when you pass `--login`, the exact login files the pack declares, read only. Both are stripped from the check by an exact match, so any other mount, any mount to a different path, or any attempt to widen either exception is still caught.
+
+## Receipts
+
+Every run writes a receipt (which agent, the policy hash, the box image that booted, the egress allow/deny counts, and how the box was disposed of), and signs it. The signature is Ed25519 over a DSSE-style pre-authentication encoding, and the signed envelope carries the public key that made it, so it verifies offline with no key server:
+
+```sh
+runclave verify /tmp/runclave-<box>-receipt.dsse.json
+```
+
+The private key is generated once and kept owner-only in your config dir; only the public key ever travels. Verification is fail-closed: any change to the receipt, the payload type, or the key makes it fail. Be clear on what a passing check means: it proves the receipt is intact and shows you the signer's fingerprint, but a valid signature is not by itself proof of authenticity. Anyone can sign a receipt with their own key. It is trustworthy only when the fingerprint is one you trust, which is why `runclave verify` calls out when the signer is this machine's own key.
 
 ## What it does not protect against
 
