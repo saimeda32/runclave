@@ -171,7 +171,11 @@ func TestReceiptRecordsEffectiveImage(t *testing.T) {
 	pol.Egress.Model = []string{"example.com"}
 	var out bytes.Buffer
 	writeRunReceipt(&out, "testimgbox", pol, []byte("agent: x"), "docker", "persisted", 1, 0)
-	path := filepath.Join(os.TempDir(), "runclave-testimgbox-receipt.json")
+	dir, derr := receiptDir()
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	path := filepath.Join(dir, "runclave-testimgbox-receipt.json")
 	defer os.Remove(path)
 	data, err := os.ReadFile(path)
 	if err != nil {

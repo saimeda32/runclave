@@ -10,11 +10,12 @@ import (
 )
 
 // ReceiptPayloadType binds a signature to "this is a runclave receipt" so a
-// signature over one kind of blob can never be replayed as another (DSSE's whole
-// point).
+// signature over one kind of blob can never be replayed as another. (This is a
+// DSSE-STYLE envelope: it uses the spec's PAE, but the envelope struct is our own
+// self-describing shape, not the spec's signatures[] array.)
 const ReceiptPayloadType = "application/vnd.runclave.receipt+json"
 
-// pae is the DSSE Pre-Authentication Encoding: DSSEv1 SP len(type) SP type SP
+// pae is the DSSE Pre-Authentication Encoding (spec-compliant): DSSEv1 SP len(type) SP type SP
 // len(payload) SP payload, with lengths in ASCII decimal. Signing the PAE (not the
 // raw payload) is what makes the payload-type binding tamper-proof.
 func pae(payloadType string, payload []byte) []byte {

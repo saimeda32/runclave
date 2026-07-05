@@ -198,28 +198,83 @@ func cmdBrokerd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// receiptSigningKey loads this machine's Ed25519 receipt-signing key, generating
-// and persisting one (owner-only) on first use. The private key stays on the host;
-// only the public key travels, inside each signed receipt. A load failure is
-// returned so the caller can fall back to an unsigned receipt rather than crash.
-func receiptSigningKey() (ed25519.PrivateKey, error) {
+// receiptKeyPath returns the owner-only key file path, creating (and tightening) the
+// runclave config dir. Kept separate so a read-only caller can locate the key
+// without generating one.
+func receiptKeyPath() (string, error) {
 	cfg, err := os.UserConfigDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	dir := filepath.Join(cfg, "runclave")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return "", err
 	}
-	path := filepath.Join(dir, "receipt_ed25519.key")
-	if data, err := os.ReadFile(path); err == nil && len(data) == ed25519.PrivateKeySize {
-		return ed25519.PrivateKey(data), nil
+	_ = os.Chmod(dir, 0o700) // tighten a pre-existing loose dir
+	return filepath.Join(dir, "receipt_ed25519.key"), nil
+}
+
+// loadReceiptKey loads the signing key if it exists, WITHOUT generating one. Used by
+// read-only paths (verify) so they never mint a machine identity as a side effect.
+func loadReceiptKey() (ed25519.PrivateKey, bool, error) {
+	path, err := receiptKeyPath()
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) != ed25519.PrivateKeySize {
+		return nil, false, fmt.Errorf("receipt key %s is corrupt (wrong size)", path)
+	}
+	return ed25519.PrivateKey(data), true, nil
+}
+
+// receiptSigningKey loads this machine's Ed25519 receipt-signing key, generating and
+// persisting one (owner-only) on first use. Generation is race-safe: the key is
+// written to a temp file with its full contents, then hard-linked into place, so the
+// FIRST writer wins atomically and a loser re-reads the winner's key (no split
+// identity, no 0-length window). The private key stays on the host; only the public
+// key travels, inside each signed receipt.
+func receiptSigningKey() (ed25519.PrivateKey, error) {
+	if priv, ok, err := loadReceiptKey(); err != nil {
+		return nil, err
+	} else if ok {
+		return priv, nil
+	}
+	path, err := receiptKeyPath()
+	if err != nil {
+		return nil, err
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, priv, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".key-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if _, err := tmp.Write(priv); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	// Atomic first-writer-wins: Link fails if the path already exists.
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if priv2, ok, lerr := loadReceiptKey(); lerr == nil && ok {
+			return priv2, nil // someone else won the race; use their key
+		}
 		return nil, err
 	}
 	return priv, nil
@@ -230,11 +285,17 @@ func receiptSigningKey() (ed25519.PrivateKey, error) {
 // fingerprint is shown so the user can confirm it is a key they trust. It notes when
 // the signer is THIS machine's key.
 func cmdVerify(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: runclave verify <receipt.dsse.json>")
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	expect := fs.String("key", "", "require the signer to be this key fingerprint (e.g. ed25519:...); fail otherwise")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	env, err := ledger.ReadEnvelope(args[0])
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "usage: runclave verify [--key <fingerprint>] <receipt.dsse.json>")
+		return 2
+	}
+	env, err := ledger.ReadEnvelope(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave verify: %v\n", err)
 		return 1
@@ -244,14 +305,29 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave verify: INVALID - %v\n", err)
 		return 1
 	}
-	mine := ""
-	if priv, kerr := receiptSigningKey(); kerr == nil {
-		if env.KeyID == ledger.KeyFingerprint(priv.Public().(ed25519.PublicKey)) {
-			mine = " (this machine's key)"
-		}
+	// The signature is cryptographically valid, but that only proves integrity and
+	// WHO signed - not that the signer is one you trust. Establish trust: a pinned
+	// --key that must match (fail-closed), else whether it is this machine's own key.
+	mine := false
+	if priv, ok, _ := loadReceiptKey(); ok {
+		mine = env.KeyID == ledger.KeyFingerprint(priv.Public().(ed25519.PublicKey))
+	}
+	if *expect != "" && env.KeyID != *expect {
+		fmt.Fprintf(stderr, "runclave verify: signature is valid but signed by %s, NOT the required %s\n", env.KeyID, *expect)
+		return 1
 	}
 	fmt.Fprintf(stdout, "OK: signature valid\n")
-	fmt.Fprintf(stdout, "  signer:      %s%s\n", env.KeyID, mine)
+	switch {
+	case *expect != "":
+		fmt.Fprintf(stdout, "  signer:      %s (matches the required key)\n", env.KeyID)
+	case mine:
+		fmt.Fprintf(stdout, "  signer:      %s (this machine's key)\n", env.KeyID)
+	default:
+		fmt.Fprintf(stdout, "  signer:      %s\n", env.KeyID)
+		fmt.Fprintf(stdout, "  WARNING: this is an UNKNOWN signer. A valid signature is not proof of authenticity -\n")
+		fmt.Fprintf(stdout, "           anyone can sign a receipt with their own key. Pass --key <fingerprint> to\n")
+		fmt.Fprintf(stdout, "           require a specific signer and fail otherwise.\n")
+	}
 	fmt.Fprintf(stdout, "  agent:       %s\n", r.Agent)
 	fmt.Fprintf(stdout, "  image:       %s\n", r.Image)
 	fmt.Fprintf(stdout, "  disposition: %s\n", r.Disposition)
@@ -960,7 +1036,17 @@ func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []b
 		LoginShared:   loginShared,
 		Disposition:   disposition,
 	}
-	path := filepath.Join(os.TempDir(), "runclave-"+name+"-receipt.json")
+	// Receipts go in an owner-only runclave dir, NOT shared /tmp. On Linux os.TempDir
+	// is the world-writable /tmp, where a local user could pre-plant a symlink at the
+	// predictable receipt path and have the write follow it (destructive clobber). An
+	// 0700 dir only the owner can write closes that. The readable .json is convenience;
+	// the SIGNED .dsse.json envelope is the artifact `runclave verify` actually checks.
+	dir, derr := receiptDir()
+	if derr != nil {
+		fmt.Fprintf(stdout, "  (receipt not written: %v)\n", derr)
+		return
+	}
+	path := filepath.Join(dir, "runclave-"+name+"-receipt.json")
 	if err := ledger.WriteReceipt(path, r); err == nil {
 		fmt.Fprintf(stdout, "  receipt: %s (policy %s…, disposition=%s)\n", path, r.PolicyHash[:12], disposition)
 	}
@@ -968,7 +1054,7 @@ func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []b
 	// verify`). A signing-key problem is non-fatal: the unsigned receipt still stands.
 	if priv, err := receiptSigningKey(); err == nil {
 		if env, serr := ledger.SignReceipt(r, priv); serr == nil {
-			sigPath := filepath.Join(os.TempDir(), "runclave-"+name+"-receipt.dsse.json")
+			sigPath := filepath.Join(dir, "runclave-"+name+"-receipt.dsse.json")
 			if werr := ledger.WriteEnvelope(sigPath, env); werr == nil {
 				fmt.Fprintf(stdout, "  signed:  %s (%s; verify with `runclave verify %s`)\n", sigPath, env.KeyID, sigPath)
 			}
@@ -976,6 +1062,20 @@ func writeRunReceipt(stdout io.Writer, name string, pol *policy.Pack, rawPol []b
 	} else {
 		fmt.Fprintf(stdout, "  (receipt not signed: %v)\n", err)
 	}
+}
+
+// receiptDir is an owner-only directory for receipts, under the user's cache dir.
+func receiptDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "runclave", "receipts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(dir, 0o700)
+	return dir, nil
 }
 
 // hostRun execs a host command and returns its stdout (used for host-side seed
