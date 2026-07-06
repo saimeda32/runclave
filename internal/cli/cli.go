@@ -108,6 +108,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdVerify(rest, stdout, stderr)
 	case "probe":
 		return cmdProbe(rest, stdout, stderr)
+	case "lockdown":
+		return cmdLockdown(rest, stdout, stderr)
 	case "open":
 		return cmdOpen(rest, stdout, stderr)
 	case "ls":
@@ -355,6 +357,67 @@ func cmdLs(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%-30s %-28s %s\n", b.Name, b.Image, b.Age)
 	}
 	fmt.Fprintln(stdout, "\nattach:  runclave open <box>     remove:  runclave destroy <box>")
+	return 0
+}
+
+// buildLockdownRuleset returns the nftables ruleset that drops all egress except
+// loopback, established/related, DNS, and TCP to the one proxy endpoint. Split out
+// as a pure function so it is unit-testable without touching the guest firewall.
+func buildLockdownRuleset(proxyIP, proxyPort, dnsIP string) string {
+	dns := "udp dport 53 accept\n    tcp dport 53 accept"
+	if dnsIP != "" {
+		dns = "ip daddr " + dnsIP + " udp dport 53 accept\n    ip daddr " + dnsIP + " tcp dport 53 accept"
+	}
+	return "table inet runclave {\n" +
+		"  chain output {\n" +
+		"    type filter hook output priority 0; policy drop;\n" +
+		"    oifname \"lo\" accept\n" +
+		"    ct state established,related accept\n" +
+		"    " + dns + "\n" +
+		"    ip daddr " + proxyIP + " tcp dport " + proxyPort + " accept\n" +
+		"  }\n" +
+		"}\n"
+}
+
+// cmdLockdown applies an in-guest egress firewall: the Apple-container backend has
+// no `--internal` no-route network like Docker, so enforcement must live inside the
+// guest VM (see runclave-design/EGRESS-ENFORCEMENT.md). It needs root (CAP_NET_ADMIN),
+// so a box image runs it from the ENTRYPOINT before dropping to the agent user.
+// UNVERIFIED: this path is built but not yet tested on a live macOS 26 `container`.
+func cmdLockdown(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("lockdown", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	proxy := fs.String("proxy", "", "host:port - the ONLY egress TCP endpoint allowed")
+	dns := fs.String("dns", "", "optional DNS resolver IP to pin (default: allow any port 53)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *proxy == "" {
+		fmt.Fprintln(stderr, "usage: runclave lockdown --proxy <host:port> [--dns <ip>]")
+		return 2
+	}
+	host, port, err := net.SplitHostPort(*proxy)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave lockdown: bad --proxy %q: %v\n", *proxy, err)
+		return 2
+	}
+	ip := host
+	if net.ParseIP(host) == nil {
+		ips, lerr := net.LookupIP(host)
+		if lerr != nil || len(ips) == 0 {
+			fmt.Fprintf(stderr, "runclave lockdown: cannot resolve proxy host %q: %v\n", host, lerr)
+			return 1
+		}
+		ip = ips[0].String()
+	}
+	ruleset := buildLockdownRuleset(ip, port, *dns)
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(ruleset)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(stderr, "runclave lockdown: applying nftables failed (needs root + nft in the image): %v\n", err)
+		return 1
+	}
 	return 0
 }
 

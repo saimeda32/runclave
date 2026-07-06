@@ -211,6 +211,27 @@ func TestDefaultWorkspacePath(t *testing.T) {
 	}
 }
 
+// The in-guest lockdown ruleset must default-drop egress and allow ONLY loopback,
+// established, DNS, and TCP to the proxy endpoint (the Apple backend's egress control).
+func TestBuildLockdownRuleset(t *testing.T) {
+	rs := buildLockdownRuleset("192.168.64.2", "8888", "192.168.64.1")
+	for _, want := range []string{
+		"policy drop;",
+		`oifname "lo" accept`,
+		"ct state established,related accept",
+		"ip daddr 192.168.64.1 udp dport 53 accept",   // pinned DNS
+		"ip daddr 192.168.64.2 tcp dport 8888 accept", // the proxy, and only the proxy
+	} {
+		if !strings.Contains(rs, want) {
+			t.Fatalf("lockdown ruleset missing %q:\n%s", want, rs)
+		}
+	}
+	// Without a pinned DNS it should allow port 53 generally (not a specific ip).
+	if open := buildLockdownRuleset("10.0.0.2", "8888", ""); !strings.Contains(open, "udp dport 53 accept") || strings.Contains(open, "ip daddr  udp") {
+		t.Fatalf("unpinned DNS ruleset wrong:\n%s", open)
+	}
+}
+
 // runclave ls lists workload boxes only: runclave- prefixed, excluding the -gw
 // gateway sidecars and any non-runclave container docker's substring filter caught.
 func TestParseLsBoxes(t *testing.T) {
