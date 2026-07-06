@@ -35,11 +35,14 @@ auth:
   method: env-token
   envVar: OPENAI_API_KEY
   deviceFlow: false
-  # Opt-in only (runclave . --login): mounts all of ~/.codex read-only. That is more
-  # than the login - it also exposes config.toml (the MCP config below) and saved
-  # sessions. A scoped OPENAI_API_KEY via envVar is preferred.
+  # Opt-in only (runclave . --login): mount ONLY the stored credential read-only, not
+  # the whole ~/.codex. Codex uses ~/.codex as CODEX_HOME and writes session/rollout
+  # files there at run time, so a read-only mount of the whole dir would break those
+  # writes; binding just auth.json leaves the rest of ~/.codex writable in the box and
+  # avoids exposing config.toml (MCP) and saved sessions. A scoped OPENAI_API_KEY via
+  # envVar is still preferred.
   loginPaths:
-    - "~/.codex"
+    - "~/.codex/auth.json"
 
 paths:
   relocateEnv: CODEX_HOME
@@ -54,6 +57,8 @@ mcp:
 
 nativeSandbox:
   # Codex ships its own `sandbox`, but inside our box WE own isolation; it is disabled
-  # via the exec bypass flag above so it does not nest. The box is the boundary.
+  # via the exec bypass flag in run.headlessFlags above so it does not nest. The box is
+  # the boundary. disableFlag stays empty here (like the other packs) because this
+  # field is descriptive only - the actual flag lives in headlessFlags, applied once.
   mode: disable
-  disableFlag: "--dangerously-bypass-approvals-and-sandbox"
+  disableFlag: ""
