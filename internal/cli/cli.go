@@ -1218,9 +1218,17 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 			cleanups = append(cleanups, func() { stop(); cleanup() })
 		}
 	}
-	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot, prompt)
+	var lc box.Plan
+	if drv.Name() == "apple-container" {
+		// The Apple backend is a separate, UNVERIFIED lifecycle (in-guest firewall
+		// instead of a --internal net). Say so loudly - it has not been tested on a
+		// live macOS 26 `container`.
+		fmt.Fprintf(stderr, "runclave: WARNING - the apple-container backend is UNVERIFIED (built, not yet tested on a live container CLI); use --backend docker for the tested path\n")
+		lc, err = box.BuildApplePlan(name, pol, ws, brokerSock, loginMounts, prompt)
+	} else {
+		lc, err = box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot, prompt)
+	}
 	if err != nil {
-		// Non-docker driver etc. - report honestly, don't fake a run.
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
 		return 1
 	}
@@ -1250,16 +1258,21 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	if *rm {
 		cleanups = append(cleanups, func() { _ = teardownBox() })
 	}
-	// Enforce the egress/host invariants BEFORE any execution. Refuse to run a
-	// plan that would open host egress or host-disk access (F1/W6).
-	if err := lc.VerifyEgressInvariants(); err != nil {
-		fmt.Fprintf(stderr, "runclave: refusing to run - %v\n", err)
+	// Enforce the boundary invariants BEFORE any execution (each backend has its own).
+	guardErr := lc.VerifyEgressInvariants()
+	invariantsMsg := "OK (box on the internal net only, egress via gateway, no host escape)"
+	if drv.Name() == "apple-container" {
+		guardErr = lc.VerifyAppleInvariants()
+		invariantsMsg = "OK (in-guest egress lockdown to the gateway, no host escape)"
+	}
+	if guardErr != nil {
+		fmt.Fprintf(stderr, "runclave: refusing to run - %v\n", guardErr)
 		return 1
 	}
 
 	fmt.Fprintf(stdout, "runclave: %s box for %s\n", drv.Name(), filepath.Base(cwd))
 	fmt.Fprintf(stdout, "  workspace: %s\n", ws.Describe())
-	fmt.Fprintf(stdout, "  egress invariants: OK (box on the internal net only, egress via gateway, no host escape)\n")
+	fmt.Fprintf(stdout, "  egress invariants: %s\n", invariantsMsg)
 
 	if *dryRun || !box.DaemonAvailable() {
 		// Honest: report the verified plan, don't pretend to run it.

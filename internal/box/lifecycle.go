@@ -67,6 +67,7 @@ type InteractiveRunner interface {
 // Plan is the full ordered lifecycle.
 type Plan struct {
 	Name          string
+	Runtime       string       // container runtime verb for exec/rm wrapping: "docker" (default) or "container" (Apple)
 	Net           string       // the internal sandbox-net (the ONLY net the WORKLOAD box may join)
 	GatewayName   string       // the egress-proxy gateway container (may also join OutboundNet)
 	OutboundNet   string       // the net with real internet egress - ONLY the gateway may join it
@@ -713,16 +714,25 @@ func flagValue(a []string, flag string) (string, bool) {
 // whether or not the box is still running.
 func (p Plan) DestroySteps() []Step {
 	// Order matters: both containers must be removed BEFORE the network, or
-	// `docker network rm` fails with "has active endpoints". The gateway is a
+	// `<rt> network rm` fails with "has active endpoints". The gateway is a
 	// separate container on the same net - remove it too, or it (and the net) leak.
-	steps := []Step{{Desc: "remove box", Argv: []string{"docker", "rm", "-f", p.Name}}}
+	rt := p.runtime()
+	steps := []Step{{Desc: "remove box", Argv: []string{rt, "rm", "-f", p.Name}}}
 	if p.GatewayName != "" {
-		steps = append(steps, Step{Desc: "remove gateway", Argv: []string{"docker", "rm", "-f", p.GatewayName}})
+		steps = append(steps, Step{Desc: "remove gateway", Argv: []string{rt, "rm", "-f", p.GatewayName}})
 	}
 	if p.Net != "" {
-		steps = append(steps, Step{Desc: "remove internal net", Argv: []string{"docker", "network", "rm", p.Net}})
+		steps = append(steps, Step{Desc: "remove internal net", Argv: []string{rt, "network", "rm", p.Net}})
 	}
 	return steps
+}
+
+// runtime is the container-runtime verb for exec/rm wrapping; "docker" by default.
+func (p Plan) runtime() string {
+	if p.Runtime == "" {
+		return "docker"
+	}
+	return p.Runtime
 }
 
 // Destroy executes the teardown. Best-effort: it attempts every step and returns
@@ -743,7 +753,7 @@ func (p Plan) Execute(r Runner) error {
 	for _, s := range p.Steps {
 		argv := s.Argv
 		if s.InBox {
-			wrap := []string{"docker", "exec"}
+			wrap := []string{p.runtime(), "exec"}
 			if s.WorkDir != "" {
 				wrap = append(wrap, "-w", s.WorkDir) // run in the cloned repo, not the box home
 			}
