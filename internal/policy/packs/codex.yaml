@@ -1,0 +1,59 @@
+# OpenAI Codex CLI policy pack - the third agent, further proving agent-neutrality.
+# OBSERVED by running the CLI in a container (codex-cli 0.142.5): command `codex`,
+# `codex exec` is the non-interactive mode, `--dangerously-bypass-approvals-and-sandbox`
+# is Codex's OWN documented flag "for environments that are externally sandboxed"
+# (exactly our box), `--skip-git-repo-check` avoids its trusted-directory prompt, and
+# with OPENAI_API_KEY set `codex exec` contacts api.openai.com/v1/responses. Auth is
+# OPENAI_API_KEY or a `codex login` under ~/.codex; CODEX_HOME relocates that dir.
+# The chatgpt.com / auth.openai.com domains below are INFERRED for the ChatGPT-login
+# path, not captured through the proxy - tighten from a real trace when available.
+# This file is DATA, not code (criterion P4): no executable hooks.
+agent: codex
+scope: local
+type: cli-headless
+
+run:
+  image: runclave/codex:latest
+  command: codex
+  # `codex exec` headless; the bypass flag disables Codex's own sandbox because the
+  # BOX is the boundary (Codex's own docs bless this for externally-sandboxed envs);
+  # skip-git-repo-check avoids the trusted-directory gate on a headless run.
+  headlessFlags: ["exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+  shell: bash # the codex image (node:20-bookworm-slim) ships bash
+
+egress:
+  # model/auth endpoints - allow (criterion E7)
+  model:
+    - api.openai.com # OBSERVED: codex exec with OPENAI_API_KEY hits api.openai.com/v1/responses
+    - chatgpt.com    # inferred: the ChatGPT-login (codex login) backend
+  # infra the agent legitimately needs
+  infra:
+    - github.com      # brokered `git push` reaches the origin (else the proxy denies it)
+    - auth.openai.com # inferred: login token refresh for the ChatGPT-login path
+
+auth:
+  method: env-token
+  envVar: OPENAI_API_KEY
+  deviceFlow: false
+  # Opt-in only (runclave . --login): mounts all of ~/.codex read-only. That is more
+  # than the login - it also exposes config.toml (the MCP config below) and saved
+  # sessions. A scoped OPENAI_API_KEY via envVar is preferred.
+  loginPaths:
+    - "~/.codex"
+
+paths:
+  relocateEnv: CODEX_HOME
+  # Deny-read hotspot (criterion S5): the stored login, on top of absence.
+  credentialHotspots:
+    - "~/.codex/auth.json"
+
+mcp:
+  configPath: "~/.codex/config.toml"
+  # Never auto-trust a repo-provided MCP config (criterion P5).
+  consentPolicy: outside-repo
+
+nativeSandbox:
+  # Codex ships its own `sandbox`, but inside our box WE own isolation; it is disabled
+  # via the exec bypass flag above so it does not nest. The box is the boundary.
+  mode: disable
+  disableFlag: "--dangerously-bypass-approvals-and-sandbox"

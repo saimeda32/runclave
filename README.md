@@ -31,7 +31,7 @@ What's built and tested:
 - the one-command `runclave .` flow on Docker or Colima, headless or `--shell` interactive
 - the internal-network plus gateway-proxy egress boundary, with a pre-flight check that refuses to run if the boundary isn't intact
 - the two-payload workspace seed, so the box's `git status` matches your laptop
-- two agents so far, Claude Code and the Gemini CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
+- three agents so far, Claude Code, the Gemini CLI, and the OpenAI Codex CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
 - passing the agent's auth token into the box by name (never on an argv)
 - the opt-in `--login` mount that reuses your existing host login
 - the git credential broker daemon and its in-box helper, auto-started by `runclave .` on a per-session socket
@@ -39,7 +39,7 @@ What's built and tested:
 What's still in progress, stated honestly rather than glossed:
 
 - verifying the broker socket bind-mount end to end on the macOS Docker VM (it works on native Linux docker; the path resolution is settled on both)
-- more agent packs (Copilot, Codex, Cursor); the model is proven with two, the rest is catalog work
+- more agent packs (Copilot, Cursor, Aider); the model is proven with three, the rest is catalog work
 - the Apple `container` backend on macOS and the bubblewrap backend on Linux
 - reading real allow and deny counts out of the gateway log (the receipt records them as unknown until then)
 

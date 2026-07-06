@@ -719,7 +719,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "print the verified lifecycle plan without executing it")
 	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
 	shell := fs.Bool("shell", false, "drop into an interactive shell in the box instead of running the agent (same isolation and egress boundary)")
-	agent := fs.String("agent", "claude-code", "which agent policy pack to run (e.g. claude-code, gemini-cli)")
+	agent := fs.String("agent", "claude-code", "which agent policy pack to run (e.g. claude-code, gemini-cli, codex)")
 	image := fs.String("image", "", "override the box image (e.g. runclave/all:latest, the combined image with every agent CLI); default is the agent's own minimal image")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
 	if err := fs.Parse(args); err != nil {
