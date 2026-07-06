@@ -17,6 +17,7 @@ import (
 // Host*Path fields are the REAL host artifacts the lifecycle `docker cp`s in; an
 // empty path means that payload is absent (no dirty state / no untracked files).
 type Plan struct {
+	RepoDir          string // the box dir the repo is cloned into (relative to the box home)
 	HostBundlePath   string // git bundle of full history (required)
 	HostDirtyBundle  string // bundle of the stash-create commit (tracked dirty), optional
 	HostUntrackedTar string // tar of untracked files, optional
@@ -57,7 +58,7 @@ func BuildPlan(repoName, bundlePath, dirtyBundle, untrackedTar string) Plan {
 			Step{Desc: "restore untracked files", Argv: []string{"tar", "xf", "/seed/untracked.tar", "-C", repoName}},
 		)
 	}
-	return Plan{HostBundlePath: bundlePath, HostDirtyBundle: dirtyBundle, HostUntrackedTar: untrackedTar, Steps: steps}
+	return Plan{RepoDir: repoName, HostBundlePath: bundlePath, HostDirtyBundle: dirtyBundle, HostUntrackedTar: untrackedTar, Steps: steps}
 }
 
 // RunFunc executes a host command and returns its stdout. Injected so

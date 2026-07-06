@@ -49,6 +49,9 @@ type Step struct {
 	// IsAgentExec marks THE step that runs the agent command, so --shell can find and
 	// rewrite exactly that step instead of assuming it is the last one.
 	IsAgentExec bool
+	// WorkDir, if set on an in-box step, runs it in that box directory (`docker exec
+	// -w`). The agent (and --shell) run in the cloned repo, not the box home.
+	WorkDir string
 }
 
 // InteractiveRunner is an optional Runner capability: run a step attached to the
@@ -243,7 +246,7 @@ func DestroyPlan(name string) Plan {
 }
 
 // BuildPlan assembles the Docker-family lifecycle. Errors for non-docker drivers.
-func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.Plan, proxyAddr, brokerSock string, includeDirty bool, loginMounts []LoginMount, loginHostRoot string) (Plan, error) {
+func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.Plan, proxyAddr, brokerSock string, includeDirty bool, loginMounts []LoginMount, loginHostRoot, prompt string) (Plan, error) {
 	if name == "" || drv == nil || pack == nil {
 		return Plan{}, fmt.Errorf("box: name, driver and pack are required")
 	}
@@ -358,6 +361,17 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// the ACTUAL chokepoint is the internal-net gateway). This is REAL now, not a
 	// Desc string: HTTP(S)_PROXY are injected into the exec env.
 	execArgv := append([]string{pack.Run.Command}, pack.Run.HeadlessFlags...)
+	// A task prompt (if given) is appended as the final argument. For every agent so
+	// far this is the right shape: claude `-p <prompt>`, gemini `-p <prompt>` (the
+	// prompt is -p's value), codex `exec <flags> <prompt>` (a positional).
+	if prompt != "" {
+		execArgv = append(execArgv, prompt)
+	}
+	// Run the agent IN the cloned repo, not the box home, so it operates on the code.
+	workDir := ""
+	if ws.RepoDir != "" {
+		workDir = BoxHome + "/" + ws.RepoDir
+	}
 	env := map[string]string{}
 	if proxyAddr != "" {
 		env["HTTP_PROXY"] = "http://" + proxyAddr
@@ -387,6 +401,7 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 		Env:         env,
 		PassEnv:     passEnv,
 		IsAgentExec: true,
+		WorkDir:     workDir,
 	})
 	return Plan{Name: name, Net: net, GatewayName: gwName, OutboundNet: outNet, BrokerSock: brokerSock, LoginMounts: loginMounts, LoginHostRoot: loginHostRoot, Allowlist: pack.AllowedDomains(), Steps: steps}, nil
 }
@@ -694,6 +709,9 @@ func (p Plan) Execute(r Runner) error {
 		argv := s.Argv
 		if s.InBox {
 			wrap := []string{"docker", "exec"}
+			if s.WorkDir != "" {
+				wrap = append(wrap, "-w", s.WorkDir) // run in the cloned repo, not the box home
+			}
 			if s.Interactive {
 				// -i always (attach stdin); -t only with a real terminal, since
 				// `docker exec -t` fails when stdin is piped/redirected.

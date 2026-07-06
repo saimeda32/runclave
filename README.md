@@ -83,7 +83,15 @@ From inside any git repo:
 runclave .
 ```
 
-That's the whole thing. It seeds a box with your repo, brings up the egress boundary, checks the isolation invariants, and runs the agent. If you have the agent's token in your environment it starts logged in; if not, it tells you.
+That's the whole thing. It seeds a box with your repo, brings up the egress boundary, checks the isolation invariants, and runs the agent in the cloned repo. If you have the agent's token in your environment it starts logged in; if not, it tells you.
+
+To hand the agent a task, pass it after the flags:
+
+```sh
+runclave . --agent codex "fix the flaky test in the payments package"
+```
+
+Flags come before the task (`runclave . [flags] [task]`), which is how Go's flag parsing works: the first non-flag argument ends flag parsing, so anything after the task is treated as part of it.
 
 If you'd rather see the plan before anything runs:
 

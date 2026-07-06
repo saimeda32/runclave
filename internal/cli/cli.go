@@ -34,7 +34,9 @@ import (
 const usage = `runclave - run coding agents in a disposable, egress-controlled box.
 
 Usage:
-  runclave .                 provision a box for the current repo and attach (the "code ." path)
+  runclave . [flags] [task]  provision a box for the current repo and run the agent, optionally on a
+                             task prompt (e.g. runclave . --agent codex "fix the flaky test").
+                             Flags must come before the task.
   runclave run <agent>       run a CLI agent (e.g. claude-code) headless in a box
   runclave backends          list detected isolation backends, strongest first
   runclave policy <agent>    validate and print an agent policy pack
@@ -725,6 +727,9 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// Any positional args form the task prompt handed to the agent, so
+	// `runclave . "fix the flaky test"` (or unquoted words) actually gives it work.
+	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
@@ -849,7 +854,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 			cleanups = append(cleanups, func() { stop(); cleanup() })
 		}
 	}
-	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot)
+	lc, err := box.BuildPlan(name, drv, pol, ws, "127.0.0.1:8888", brokerSock, !*clean, loginMounts, loginHostRoot, prompt)
 	if err != nil {
 		// Non-docker driver etc. - report honestly, don't fake a run.
 		fmt.Fprintf(stderr, "runclave: %v\n", err)

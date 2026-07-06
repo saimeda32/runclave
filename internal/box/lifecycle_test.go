@@ -42,7 +42,7 @@ func testPack() *policy.Pack {
 func buildOK(t *testing.T) Plan {
 	t.Helper()
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "/host/dirty.bundle", "/host/untracked.tar")
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestPlanPassesEgressInvariants(t *testing.T) {
 // Non-docker driver is rejected (honest scope, not a silent wrong-CLI plan).
 func TestNonDockerRejected(t *testing.T) {
 	ws := workspace.BuildPlan("p", "/h/b", "", "")
-	if _, err := BuildPlan("b", nonDocker{}, testPack(), ws, "", "", false, nil, ""); err == nil {
+	if _, err := BuildPlan("b", nonDocker{}, testPack(), ws, "", "", false, nil, "", ""); err == nil {
 		t.Fatal("non-docker driver must be rejected by the docker-family plan")
 	}
 }
@@ -261,7 +261,7 @@ func TestDestroyRemovesBoxAndNet(t *testing.T) {
 func TestBrokerSocketMountNarrowlyAllowed(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
 	// With a broker socket configured, the plan must still pass its invariants.
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", false, nil, "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", false, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestHostileBrokerSourceRejected(t *testing.T) {
 
 	// BuildPlan must refuse an invalid broker path outright (fail-closed).
 	ws := workspace.BuildPlan("p", "/h/b", "", "")
-	if _, err := BuildPlan("b", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/etc", false, nil, ""); err == nil {
+	if _, err := BuildPlan("b", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/etc", false, nil, "", ""); err == nil {
 		t.Fatal("BuildPlan must reject a non-socket broker path")
 	}
 }
@@ -398,7 +398,7 @@ func TestExecuteWrapsAndSequences(t *testing.T) {
 func TestLoginMountAllowedButNarrow(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
 	good := []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, good, "/Users/me")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, good, "/Users/me", "")
 	if err != nil {
 		t.Fatalf("a valid login mount must be accepted: %v", err)
 	}
@@ -430,13 +430,13 @@ func TestLoginMountRejectsEscape(t *testing.T) {
 		{{HostPath: "/Users/me/,x", BoxPath: BoxHome + "/.claude"}},         // option smuggling via comma
 	}
 	for _, m := range bad {
-		if _, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, m, "/Users/me"); err == nil {
+		if _, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, m, "/Users/me", ""); err == nil {
 			t.Fatalf("login mount %v must be rejected", m)
 		}
 	}
 	// And with NO host root configured, a login mount is refused outright.
 	if _, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "",
-		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, ""); err == nil {
+		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, "", ""); err == nil {
 		t.Fatal("login mounts with no host root must be refused")
 	}
 }
@@ -447,7 +447,7 @@ func TestLoginMountRejectsEscape(t *testing.T) {
 func TestGuardCatchesUnsanctionedMount(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
 	p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "",
-		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, "/Users/me")
+		true, []LoginMount{{HostPath: "/Users/me/.claude", BoxPath: BoxHome + "/.claude"}}, "/Users/me", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +461,45 @@ func TestGuardCatchesUnsanctionedMount(t *testing.T) {
 	}
 	if err := p.VerifyEgressInvariants(); err == nil {
 		t.Fatal("an unsanctioned host mount must be caught by the guard")
+	}
+}
+
+// A task prompt is appended to the agent exec as its final argument, and the agent
+// runs IN the cloned repo dir (docker exec -w), not the box home.
+func TestPromptAndWorkdir(t *testing.T) {
+	ws := workspace.BuildPlan("myproj", "/host/repo.bundle", "", "")
+	p, err := BuildPlan("runclave-myproj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "", "fix the flaky test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exec Step
+	for _, s := range p.Steps {
+		if s.IsAgentExec {
+			exec = s
+		}
+	}
+	// The prompt is the LAST argv element (claude -p "<prompt>").
+	if exec.Argv[len(exec.Argv)-1] != "fix the flaky test" {
+		t.Fatalf("prompt must be the final exec arg, got %v", exec.Argv)
+	}
+	if exec.WorkDir != BoxHome+"/myproj" {
+		t.Fatalf("agent must run in the cloned repo dir, got WorkDir %q", exec.WorkDir)
+	}
+	// It renders with -w pointing at the repo.
+	r := &fakeRunner{}
+	if err := p.Execute(r); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.calls[len(r.calls)-1], " ")
+	if !strings.Contains(joined, "-w "+BoxHome+"/myproj ") || !strings.HasSuffix(joined, "fix the flaky test") {
+		t.Fatalf("exec must render with -w <repo> and the prompt, got %q", joined)
+	}
+	// No prompt -> no trailing prompt arg (the exec is just command+flags).
+	p2, _ := BuildPlan("runclave-myproj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "", "")
+	for _, s := range p2.Steps {
+		if s.IsAgentExec && s.Argv[len(s.Argv)-1] != "-p" {
+			t.Fatalf("no prompt must leave exec as command+flags, got %v", s.Argv)
+		}
 	}
 }
 
@@ -504,8 +543,9 @@ func TestInteractiveShellPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(r.calls[execIdx], " ")
-	if !strings.HasPrefix(joined, "docker exec -it ") || !strings.HasSuffix(joined, " bash") {
-		t.Fatalf("shell step must render as `docker exec -it <box> bash`, got %q", joined)
+	// Runs in the cloned repo (-w) with a TTY (-it) and is a bash shell.
+	if !strings.Contains(joined, "docker exec -w /home/runclave/proj -it ") || !strings.HasSuffix(joined, " bash") {
+		t.Fatalf("shell step must render as `docker exec -w <repo> -it <box> bash`, got %q", joined)
 	}
 	// Without a TTY (piped stdin) it must use -i only, never -t.
 	p2 := buildOK(t)
@@ -515,8 +555,8 @@ func TestInteractiveShellPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := strings.Join(r2.calls[len(r2.calls)-1], " ")
-	if !strings.Contains(last, "docker exec -i ") || strings.Contains(last, "-it") {
-		t.Fatalf("no-TTY shell must render `docker exec -i` (no -t), got %q", last)
+	if !strings.Contains(last, " -i ") || strings.Contains(last, "-it") {
+		t.Fatalf("no-TTY shell must render -i (no -t), got %q", last)
 	}
 }
 
@@ -557,7 +597,7 @@ func TestValidBrokerSock(t *testing.T) {
 // such step exists.
 func TestBrokerWiresGitCredentialHelper(t *testing.T) {
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
-	withSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "")
+	withSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "/run/runclave/broker.sock", true, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +612,7 @@ func TestBrokerWiresGitCredentialHelper(t *testing.T) {
 		t.Fatalf("broker socket must enable useHttpPath, got:\n%s", joined)
 	}
 	// No socket -> no credential-helper wiring.
-	noSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "")
+	noSock, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +630,7 @@ func TestAuthTokenPassedByNameNotValue(t *testing.T) {
 	pack := testPack()
 	pack.Auth.EnvVar = "CLAUDE_CODE_OAUTH_TOKEN"
 	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
-	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true, nil, "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
