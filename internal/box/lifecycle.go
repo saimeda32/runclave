@@ -361,10 +361,14 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// the ACTUAL chokepoint is the internal-net gateway). This is REAL now, not a
 	// Desc string: HTTP(S)_PROXY are injected into the exec env.
 	execArgv := append([]string{pack.Run.Command}, pack.Run.HeadlessFlags...)
-	// A task prompt (if given) is appended as the final argument. For every agent so
-	// far this is the right shape: claude `-p <prompt>`, gemini `-p <prompt>` (the
-	// prompt is -p's value), codex `exec <flags> <prompt>` (a positional).
+	// A task prompt (if given) is appended as the final argument. claude `-p <prompt>`
+	// and gemini `-p <prompt>` take it as the flag's value; codex `exec <flags> <prompt>`
+	// takes it as a positional, so for positional-prompt packs a `--` end-of-options
+	// separator goes first, so a task starting with a dash isn't parsed as an agent flag.
 	if prompt != "" {
+		if pack.Run.PromptPositional {
+			execArgv = append(execArgv, "--")
+		}
 		execArgv = append(execArgv, prompt)
 	}
 	// Run the agent IN the cloned repo, not the box home, so it operates on the code.
@@ -428,21 +432,28 @@ func (p Plan) VerifyEgressInvariants() error {
 		// The box provision step is the ONLY step permitted a mount, and ONLY the
 		// exact broker socket (removed before the check). Every other mount/-v, and
 		// every mount on every other step, is still caught by HasHostEscape.
-		checkArgv := s.Argv
-		if isContainerCreate(s.Argv) && flagValueEq(s.Argv, "--name") == p.Name {
-			// Strip ONLY the two sanctioned exceptions - the broker socket and the
-			// exact opt-in login mounts - before the escape check. Everything else,
-			// including any other mount, is still caught.
-			checkArgv = removeBrokerMount(s.Argv, p.BrokerSock)
-			checkArgv = removeLoginMounts(checkArgv, p.LoginMounts, p.LoginHostRoot)
-		}
-		if workspace.HasHostEscape(checkArgv) {
-			return fmt.Errorf("box: step %q grants host-disk access (W6)", s.Desc)
-		}
 		a := s.Argv
-		joined := strings.Join(a, " ")
-		if strings.Contains(joined, "--network host") || strings.Contains(joined, "docker.sock") {
-			return fmt.Errorf("box: step %q exposes host network/socket", s.Desc)
+		// The host-disk-escape and host-network/socket checks apply to HOST-side steps
+		// (the `docker run`/`network`/`cp` commands). In-box steps run via `docker exec`
+		// INSIDE the already-isolated box - they carry the agent command and the user's
+		// task prompt, not host flags, so scanning their argv here only produces false
+		// refusals (e.g. a task literally mentioning "docker.sock" or starting with -v).
+		if !s.InBox {
+			checkArgv := s.Argv
+			if isContainerCreate(s.Argv) && flagValueEq(s.Argv, "--name") == p.Name {
+				// Strip ONLY the two sanctioned exceptions - the broker socket and the
+				// exact opt-in login mounts - before the escape check. Everything else,
+				// including any other mount, is still caught.
+				checkArgv = removeBrokerMount(s.Argv, p.BrokerSock)
+				checkArgv = removeLoginMounts(checkArgv, p.LoginMounts, p.LoginHostRoot)
+			}
+			if workspace.HasHostEscape(checkArgv) {
+				return fmt.Errorf("box: step %q grants host-disk access (W6)", s.Desc)
+			}
+			joined := strings.Join(a, " ")
+			if strings.Contains(joined, "--network host") || strings.Contains(joined, "docker.sock") {
+				return fmt.Errorf("box: step %q exposes host network/socket", s.Desc)
+			}
 		}
 		// Any container-CREATING step must be provisioned DIRECTLY on the internal
 		// sandbox-net (reworked after a real run: `--network none` can't later be

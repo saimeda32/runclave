@@ -503,6 +503,55 @@ func TestPromptAndWorkdir(t *testing.T) {
 	}
 }
 
+// A task prompt that happens to contain "docker.sock" or start with a dash must NOT
+// trip the host-escape/network guard - those checks are for host-side steps, and the
+// prompt rides on an in-box docker-exec step.
+func TestPromptDoesNotTripHostEscapeGuard(t *testing.T) {
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	for _, task := range []string{"fix the docker.sock permission bug", "-v is the verbose flag to remove", "make --network host work"} {
+		p, err := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "", task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.VerifyEgressInvariants(); err != nil {
+			t.Fatalf("a task prompt %q must not fail the guard: %v", task, err)
+		}
+	}
+}
+
+// A positional-prompt pack (codex) gets a `--` separator before the task, so a task
+// starting with a dash is not parsed as an agent flag.
+func TestPositionalPromptSeparator(t *testing.T) {
+	pack := testPack()
+	pack.Run.PromptPositional = true
+	ws := workspace.BuildPlan("proj", "/host/repo.bundle", "", "")
+	p, err := BuildPlan("runclave-proj", dockerDriver{}, pack, ws, "127.0.0.1:8888", "", true, nil, "", "--help me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exec Step
+	for _, s := range p.Steps {
+		if s.IsAgentExec {
+			exec = s
+		}
+	}
+	// ... command flags -- "--help me"
+	if exec.Argv[len(exec.Argv)-2] != "--" || exec.Argv[len(exec.Argv)-1] != "--help me" {
+		t.Fatalf("positional prompt must be preceded by `--`, got %v", exec.Argv)
+	}
+	// A non-positional pack must NOT insert `--`.
+	p2, _ := BuildPlan("runclave-proj", dockerDriver{}, testPack(), ws, "127.0.0.1:8888", "", true, nil, "", "do X")
+	for _, s := range p2.Steps {
+		if s.IsAgentExec {
+			for _, tok := range s.Argv {
+				if tok == "--" {
+					t.Fatalf("non-positional pack must not insert `--`, got %v", s.Argv)
+				}
+			}
+		}
+	}
+}
+
 // --shell rewrites only the FINAL step into an interactive in-box shell, keeping
 // the box/gateway/seed and the egress env intact, and it still passes the guard.
 func TestInteractiveShellPlan(t *testing.T) {

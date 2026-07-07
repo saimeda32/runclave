@@ -32,6 +32,11 @@ type Pack struct {
 		// Empty defaults to "sh" (present on alpine/debian/node images); set "bash"
 		// when the image ships it.
 		Shell string `yaml:"shell"`
+		// PromptPositional says the task prompt is a trailing POSITIONAL argument (e.g.
+		// `codex exec <flags> <prompt>`), not the value of a flag like `-p`. When true, a
+		// `--` end-of-options separator is inserted before the prompt so a task that
+		// starts with a dash is not mistaken for one of the agent's own flags.
+		PromptPositional bool `yaml:"promptPositional"`
 	} `yaml:"run"`
 
 	Egress struct {

@@ -730,6 +730,18 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	// Any positional args form the task prompt handed to the agent, so
 	// `runclave . "fix the flaky test"` (or unquoted words) actually gives it work.
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	// Go's flag parsing stops at the first non-flag arg, so a runclave flag placed
+	// AFTER the task silently becomes part of the task (e.g. `runclave . "x" --dry-run`
+	// does a real run). Warn loudly if a task token looks like a known runclave flag.
+	knownFlags := map[string]bool{"--dry-run": true, "--clean": true, "--shell": true, "--login": true, "--agent": true, "--image": true, "--backend": true, "--policies": true}
+	for _, tok := range fs.Args() {
+		if knownFlags[tok] {
+			fmt.Fprintf(stderr, "runclave: WARNING - %q is part of the TASK, not a flag. runclave flags must come before the task (runclave . [flags] [task]).\n", tok)
+		}
+	}
+	if *shell && prompt != "" {
+		fmt.Fprintf(stderr, "runclave: note - --shell ignores the task prompt; you get an interactive shell in the repo instead\n")
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)

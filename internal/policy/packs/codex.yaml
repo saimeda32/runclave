@@ -20,6 +20,7 @@ run:
   # skip-git-repo-check avoids the trusted-directory gate on a headless run.
   headlessFlags: ["exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
   shell: bash # the codex image (node:20-bookworm-slim) ships bash
+  promptPositional: true # `codex exec <flags> <prompt>` - prompt is a positional, so a `--` guards it
 
 egress:
   # model/auth endpoints - allow (criterion E7)
