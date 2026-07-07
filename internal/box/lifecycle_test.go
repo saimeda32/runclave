@@ -513,6 +513,30 @@ func TestPromptAndWorkdir(t *testing.T) {
 	}
 }
 
+// The standalone `runclave destroy` path (DestroyPlan) must ALSO remove the gateway,
+// or it leaks the gateway and `network rm` fails ("has active endpoints").
+func TestDestroyPlanRemovesGateway(t *testing.T) {
+	p := DestroyPlan("runclave-proj")
+	if p.GatewayName != "runclave-proj-gw" {
+		t.Fatalf("DestroyPlan must set the gateway name, got %q", p.GatewayName)
+	}
+	r := &fakeRunner{}
+	if err := p.Destroy(r); err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, c := range r.calls {
+		joined += strings.Join(c, " ") + "|"
+	}
+	if !strings.Contains(joined, "docker rm -f runclave-proj-gw") {
+		t.Fatalf("standalone destroy must remove the gateway: %s", joined)
+	}
+	// gateway removed before the net rm.
+	if strings.Index(joined, "rm -f runclave-proj-gw") > strings.Index(joined, "network rm ") {
+		t.Fatalf("gateway must be removed before the net: %s", joined)
+	}
+}
+
 // A task prompt that happens to contain "docker.sock" or start with a dash must NOT
 // trip the host-escape/network guard - those checks are for host-side steps, and the
 // prompt rides on an in-box docker-exec step.

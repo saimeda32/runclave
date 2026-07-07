@@ -560,7 +560,7 @@ func cmdDestroy(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "destroyed %s (box + internal net removed)\n", fs.Arg(0))
+	fmt.Fprintf(stdout, "destroyed %s (box, gateway, and internal net removed)\n", fs.Arg(0))
 	return 0
 }
 
@@ -888,6 +888,19 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "runclave: note - the shell has the agent's auth token in its environment (%s); anyone at this prompt can read it\n", pol.Auth.EnvVar)
 		}
 	}
+	// Box teardown, guarded so it runs at most once whether from the normal --rm path
+	// or from the Ctrl-C signal handler. Registering it in cleanups (only for --rm)
+	// means an interrupt tears the box/gateway/net down too, honouring --rm's "nothing
+	// left behind" even on interrupt - not just the host-side seed/broker dirs.
+	var boxTornDown sync.Once
+	teardownBox := func() error {
+		var derr error
+		boxTornDown.Do(func() { derr = lc.Destroy(box.ExecRunner{}) })
+		return derr
+	}
+	if *rm {
+		cleanups = append(cleanups, func() { _ = teardownBox() })
+	}
 	// Enforce the egress/host invariants BEFORE any execution. Refuse to run a
 	// plan that would open host egress or host-disk access (F1/W6).
 	if err := lc.VerifyEgressInvariants(); err != nil {
@@ -916,6 +929,9 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintf(stdout, "  git broker: would serve short-lived tokens on %s (daemon not started for a dry run)\n", brokerSock)
 		}
+		if *rm {
+			fmt.Fprintf(stdout, "  --rm: on a real run the box, gateway and net are torn down when it exits\n")
+		}
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "planned", -1, -1, loginShared...)
 		return 0
 	}
@@ -931,10 +947,14 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := lc.Execute(box.ExecRunner{}); err != nil {
 		fmt.Fprintf(stderr, "runclave: lifecycle failed: %v\n", err)
+		// Read egress counts (the gateway log may explain the failure) BEFORE teardown.
+		fAllow, fDeny := gatewayEgressCounts(lc.GatewayName)
 		// Best-effort teardown so a half-provisioned box and its network don't
-		// linger and block the next run on a name collision.
-		_ = lc.Destroy(box.ExecRunner{})
-		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", -1, -1, loginShared...)
+		// linger and block the next run on a name collision. This tears the box down
+		// even without --rm (a broken box is not useful to keep); say so.
+		_ = teardownBox()
+		fmt.Fprintf(stdout, "  box torn down after the failure\n")
+		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", fAllow, fDeny, loginShared...)
 		return 1
 	}
 	if brokerSock != "" {
@@ -954,14 +974,19 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	// the only artifact that outlives the box.
 	disposition := "persisted"
 	if *rm {
-		if derr := lc.Destroy(box.ExecRunner{}); derr != nil {
+		if derr := teardownBox(); derr != nil {
+			// Honest: teardown didn't fully complete, so the (signed) receipt must not
+			// claim "destroyed" or "nothing left behind".
 			fmt.Fprintf(stderr, "runclave: teardown: %v\n", derr)
-		}
-		disposition = "destroyed"
-		if *shell {
-			fmt.Fprintf(stdout, "  shell session ended; box torn down (--rm), nothing left behind\n")
+			disposition = "destroy-failed"
+			fmt.Fprintf(stdout, "  run complete; teardown FAILED - some resources may remain (try `runclave destroy %s`)\n", name)
 		} else {
-			fmt.Fprintf(stdout, "  run complete; box torn down (--rm), nothing left behind\n")
+			disposition = "destroyed"
+			if *shell {
+				fmt.Fprintf(stdout, "  shell session ended; box torn down (--rm), nothing left behind\n")
+			} else {
+				fmt.Fprintf(stdout, "  run complete; box torn down (--rm), nothing left behind\n")
+			}
 		}
 	} else if *shell {
 		fmt.Fprintf(stdout, "  shell session ended (box persists; `runclave destroy %s` to remove)\n", name)

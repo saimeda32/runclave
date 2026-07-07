@@ -242,7 +242,11 @@ func setNetwork(a []string, net string) []string {
 // of an existing box by name - so `runclave destroy <name>` can remove it without
 // reconstructing the full provisioning plan.
 func DestroyPlan(name string) Plan {
-	return Plan{Name: name, Net: sandboxNet(name)}
+	// Set GatewayName so `runclave destroy` removes the gateway too. Without it the
+	// gateway stays attached to the internal net, `docker network rm` fails with
+	// "has active endpoints", and both the gateway and the net leak. The naming here
+	// must match BuildPlan (gwName = name + "-gw", net = sandboxNet(name)).
+	return Plan{Name: name, GatewayName: name + "-gw", Net: sandboxNet(name)}
 }
 
 // BuildPlan assembles the Docker-family lifecycle. Errors for non-docker drivers.
