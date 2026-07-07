@@ -40,6 +40,32 @@ type Proxy struct {
 	Counters Counters
 	// onDecision is optional; receives (host, allowed) for ledger logging.
 	onDecision func(host string, allowed bool)
+	// ca + inject enable credential injection: for a host in inject, the proxy
+	// TLS-terminates (MITM) with a ca-minted cert and forces the credential header,
+	// so the real secret lives only here in the gateway, never in the box. nil = the
+	// default blind-tunnel behaviour (no MITM).
+	ca     *CA
+	inject map[string]InjectRule // keyed by hostname (no port)
+	// injectTransport is the round-tripper to the REAL upstream for injected hosts;
+	// nil means http.DefaultTransport (validates the upstream cert against system
+	// roots). Overridable for tests.
+	injectTransport http.RoundTripper
+}
+
+// SetInjector turns on credential injection for the given hosts. Each injected host
+// MUST also be in the egress allowlist (injection is MITM, not a bypass). The box
+// must trust ca.CertPEM() for the handshake to succeed.
+func (p *Proxy) SetInjector(ca *CA, rules map[string]InjectRule) error {
+	for host, r := range rules {
+		if err := r.valid(); err != nil {
+			return err
+		}
+		if !p.Allowed(host + ":443") {
+			return fmt.Errorf("egress: inject host %q is not in the allowlist", host)
+		}
+	}
+	p.ca, p.inject = ca, rules
+	return nil
 }
 
 // AllowsEverything reports whether this proxy is in explicit allow-all mode, so
@@ -150,6 +176,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Deny is a hard close with a clear status; the receipt/ledger records it.
 		http.Error(w, "egress denied by policy", http.StatusForbidden)
 		return
+	}
+	// Credential injection: for an injected host, MITM this TLS connection instead of
+	// blind-tunnelling, so we can force the real credential header (the box never has
+	// the secret). Only allowlisted + explicitly-injected hosts take this path.
+	if hn, _, e := net.SplitHostPort(host); e == nil && p.ca != nil {
+		if rule, ok := p.inject[hn]; ok {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			srcConn, _, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			go p.mitmInject(srcConn, host, hn, rule)
+			return
+		}
 	}
 	dstConn, err := net.Dial("tcp", host)
 	if err != nil {
