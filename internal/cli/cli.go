@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -994,6 +995,10 @@ func cmdProxy(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", "127.0.0.1:8888", "listen address")
 	allow := fs.String("allow", "", "comma-separated egress allowlist (empty = deny all, fail-closed)")
+	injectHost := fs.String("inject-host", "", "comma-separated hosts to inject a credential for (each MUST also be in --allow); the gateway MITMs these with an ephemeral CA so the real secret never enters the box")
+	injectHeader := fs.String("inject-header", "Authorization", "the header to force onto injected requests")
+	injectValueEnv := fs.String("inject-value-env", "", "name of the env var holding the REAL credential value; read from the environment (never argv, so it stays out of `ps`)")
+	injectCAOut := fs.String("inject-ca-out", "", "path to write the CA certificate the box must trust (cert only; the CA key never leaves this process)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1009,6 +1014,11 @@ func cmdProxy(args []string, stdout, stderr io.Writer) int {
 	if p.AllowsEverything() {
 		fmt.Fprintln(stderr, "runclave proxy: ⚠️  UNRESTRICTED EGRESS (allowlist is '*') - this box is NOT egress-sandboxed by choice")
 	}
+	if *injectHost != "" {
+		if code := enableInjection(p, *injectHost, *injectHeader, *injectValueEnv, *injectCAOut, stdout, stderr); code != 0 {
+			return code
+		}
+	}
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave proxy: %v\n", err)
@@ -1019,6 +1029,84 @@ func cmdProxy(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave proxy: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+// enableInjection turns on credential injection on p from the proxy's flags. The
+// gateway generates its OWN ephemeral CA here (the key never leaves this process),
+// writes only the cert to injectCAOut for the box to trust, and reads the real
+// secret from the environment (not argv) so it stays out of `ps`. Each injected
+// host must already be in the allowlist - SetInjector refuses otherwise, so
+// injection can never be a bypass. Returns a non-zero CLI code on any failure.
+func enableInjection(p *egress.Proxy, hostsCSV, header, valueEnv, caOut string, stdout, stderr io.Writer) int {
+	if valueEnv == "" || caOut == "" {
+		fmt.Fprintln(stderr, "runclave proxy: --inject-host requires --inject-value-env and --inject-ca-out")
+		return 2
+	}
+	token := os.Getenv(valueEnv)
+	if token == "" {
+		fmt.Fprintf(stderr, "runclave proxy: env %q is empty; refusing to inject a blank credential\n", valueEnv)
+		return 1
+	}
+	rules := map[string]egress.InjectRule{}
+	for _, h := range strings.Split(hostsCSV, ",") {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		// Normalize to exactly what the box's TLS client puts in the CONNECT authority
+		// (lowercase, bare host). A mismatch here would pass the allowlist check yet
+		// silently miss the inject-map lookup at request time - injection "ON" in the
+		// log but the credential never forced. Reject ports/wildcards/whitespace with a
+		// clear message instead of letting them fail obscurely downstream.
+		if strings.ContainsAny(h, ":*") || strings.ContainsAny(h, " \t") {
+			fmt.Fprintf(stderr, "runclave proxy: --inject-host %q must be a bare hostname (no port, no wildcard)\n", h)
+			return 2
+		}
+		rules[strings.ToLower(h)] = egress.InjectRule{Header: header, Value: token}
+	}
+	if len(rules) == 0 {
+		fmt.Fprintln(stderr, "runclave proxy: --inject-host listed no hosts")
+		return 2
+	}
+	ca, err := egress.GenerateCA()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave proxy: generate CA: %v\n", err)
+		return 1
+	}
+	if err := p.SetInjector(ca, rules); err != nil {
+		// e.g. an inject host that isn't allowlisted - fail loudly, don't silently skip.
+		fmt.Fprintf(stderr, "runclave proxy: %v\n", err)
+		return 1
+	}
+	// Write the CERT only (never the key) so the box can trust the MITM leaf. 0644 is
+	// right for a public cert. O_EXCL|O_NOFOLLOW: the gateway runs as root and writes
+	// into a mount the (untrusted) box can touch - refuse to follow a symlink the box
+	// planted (root-truncate-an-arbitrary-path) or to reuse a file the box pre-created
+	// with its OWN CA. Fail closed if the target already exists.
+	f, err := os.OpenFile(caOut, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave proxy: create CA cert %q: %v\n", caOut, err)
+		return 1
+	}
+	if _, err := f.Write(ca.CertPEM()); err != nil {
+		f.Close()
+		fmt.Fprintf(stderr, "runclave proxy: write CA cert to %q: %v\n", caOut, err)
+		return 1
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(stderr, "runclave proxy: write CA cert to %q: %v\n", caOut, err)
+		return 1
+	}
+	// Do NOT log the token or the env var's value - only that injection is on and for
+	// which hosts, so the receipt/log is safe to keep.
+	hosts := make([]string, 0, len(rules))
+	for h := range rules {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	fmt.Fprintf(stdout, "runclave proxy: credential injection ON for %s (header %q; secret stays in the gateway; CA cert -> %s)\n",
+		strings.Join(hosts, ","), header, caOut)
 	return 0
 }
 

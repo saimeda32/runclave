@@ -188,7 +188,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// blind-tunnelling, so we can force the real credential header (the box never has
 	// the secret). Only allowlisted + explicitly-injected hosts take this path.
 	if hn, _, e := net.SplitHostPort(host); e == nil && p.ca != nil {
-		if rule, ok := p.inject[hn]; ok {
+		// Match the normalized key the injector stored (lowercase, bare host), so a
+		// differently-cased CONNECT authority can't silently skip injection.
+		if rule, ok := p.inject[strings.ToLower(hn)]; ok {
 			// Cap concurrent MITM connections; shed load rather than block/amplify.
 			select {
 			case p.injectSem <- struct{}{}:
