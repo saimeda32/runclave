@@ -91,6 +91,50 @@ func TestCredentialInjectionReplacesPlaceholder(t *testing.T) {
 	}
 }
 
+// A POST with a body, reused over keep-alive, must inject on EVERY request and not
+// desync (the second request must parse correctly and also get the real secret).
+func TestInjectPostBodyAndKeepAlive(t *testing.T) {
+	// Upstream echoes the auth header AND the body length it received.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "auth=%s len=%d", r.Header.Get("Authorization"), len(b))
+	}))
+	defer srv.Close()
+	upHost := strings.TrimPrefix(srv.URL, "https://")
+	hostname, _, _ := net.SplitHostPort(upHost)
+
+	ca, _ := GenerateCA()
+	proxy := New([]string{hostname}, nil)
+	proxy.injectTransport = srv.Client().Transport
+	_ = proxy.SetInjector(ca, map[string]InjectRule{hostname: {Header: "Authorization", Value: "Bearer REAL"}})
+
+	pl, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer pl.Close()
+	go http.Serve(pl, proxy)
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.CertPEM())
+	proxyURL, _ := url.Parse("http://" + pl.Addr().String())
+	// One client/transport so keep-alive reuses the same MITM connection.
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{RootCAs: caPool},
+	}}
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("POST", "https://"+upHost+"/x", strings.NewReader("hello-body"))
+		req.Header.Set("Authorization", "Bearer PLACEHOLDER")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "auth=Bearer REAL") || !strings.Contains(string(body), "len=10") {
+			t.Fatalf("request %d: injection/body wrong: %q", i, body)
+		}
+	}
+}
+
 // A host that is NOT injected is blind-tunnelled (no MITM), unchanged behaviour.
 func TestNonInjectedHostIsTunnelled(t *testing.T) {
 	upstream := newTLSEchoServer(t)

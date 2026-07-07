@@ -18,6 +18,11 @@ import (
 // hosts it injects credentials for. It is generated per run; the CA CERT is handed
 // to the box (so the box trusts the gateway for those hosts) while the CA KEY never
 // leaves the gateway. It mints a leaf per host on demand and caches it.
+//
+// Residual risk (accepted): a CA the box trusts can sign ANY host, so a compromised
+// gateway could MITM hosts beyond the inject list. This is bounded by the CA being
+// ephemeral (fresh per run), short-lived (24h), and its key never leaving the
+// gateway - and the gateway is runclave's own trusted component.
 type CA struct {
 	cert    *x509.Certificate
 	certDER []byte

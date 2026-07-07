@@ -50,7 +50,13 @@ type Proxy struct {
 	// nil means http.DefaultTransport (validates the upstream cert against system
 	// roots). Overridable for tests.
 	injectTransport http.RoundTripper
+	// injectSem caps concurrent MITM connections (each does an RSA handshake), so a
+	// hostile box can't amplify load with many inject CONNECTs.
+	injectSem chan struct{}
 }
+
+// maxInjectConns bounds concurrent credential-injection MITM connections.
+const maxInjectConns = 256
 
 // SetInjector turns on credential injection for the given hosts. Each injected host
 // MUST also be in the egress allowlist (injection is MITM, not a bypass). The box
@@ -65,6 +71,7 @@ func (p *Proxy) SetInjector(ca *CA, rules map[string]InjectRule) error {
 		}
 	}
 	p.ca, p.inject = ca, rules
+	p.injectSem = make(chan struct{}, maxInjectConns)
 	return nil
 }
 
@@ -182,14 +189,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the secret). Only allowlisted + explicitly-injected hosts take this path.
 	if hn, _, e := net.SplitHostPort(host); e == nil && p.ca != nil {
 		if rule, ok := p.inject[hn]; ok {
+			// Cap concurrent MITM connections; shed load rather than block/amplify.
+			select {
+			case p.injectSem <- struct{}{}:
+			default:
+				http.Error(w, "too many injected connections", http.StatusServiceUnavailable)
+				return
+			}
 			hj, ok := w.(http.Hijacker)
 			if !ok {
+				<-p.injectSem
 				http.Error(w, "hijack unsupported", http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
 			srcConn, _, err := hj.Hijack()
 			if err != nil {
+				<-p.injectSem
 				return
 			}
 			go p.mitmInject(srcConn, host, hn, rule)
