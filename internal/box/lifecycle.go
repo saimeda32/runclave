@@ -695,10 +695,17 @@ func flagValue(a []string, flag string) (string, bool) {
 // net. Disposable-by-default (C4): destroy leaves zero residue. `-f` so it works
 // whether or not the box is still running.
 func (p Plan) DestroySteps() []Step {
-	return []Step{
-		{Desc: "remove box", Argv: []string{"docker", "rm", "-f", p.Name}},
-		{Desc: "remove internal net", Argv: []string{"docker", "network", "rm", p.Net}},
+	// Order matters: both containers must be removed BEFORE the network, or
+	// `docker network rm` fails with "has active endpoints". The gateway is a
+	// separate container on the same net - remove it too, or it (and the net) leak.
+	steps := []Step{{Desc: "remove box", Argv: []string{"docker", "rm", "-f", p.Name}}}
+	if p.GatewayName != "" {
+		steps = append(steps, Step{Desc: "remove gateway", Argv: []string{"docker", "rm", "-f", p.GatewayName}})
 	}
+	if p.Net != "" {
+		steps = append(steps, Step{Desc: "remove internal net", Argv: []string{"docker", "network", "rm", p.Net}})
+	}
+	return steps
 }
 
 // Destroy executes the teardown. Best-effort: it attempts every step and returns

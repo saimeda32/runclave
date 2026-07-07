@@ -54,6 +54,8 @@ Flags:
   --clean            clone HEAD only, without uncommitted working-tree changes
   --shell            drop into an interactive shell in the box instead of running
                      the agent (same isolation and egress boundary)
+  --rm               tear the box and its network down when the run (or shell) exits,
+                     leaving nothing behind; the signed receipt is the only artifact
   --login            mount this agent's existing host login (read-only) so it starts
                      logged in; shares a long-lived credential, off by default
   --policies <dir>   opt-in dir of on-disk policy packs; default is the embedded
@@ -721,6 +723,7 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "print the verified lifecycle plan without executing it")
 	login := fs.Bool("login", false, "mount this agent's existing host login (read-only) so it starts logged in; shares a long-lived credential with the box")
 	shell := fs.Bool("shell", false, "drop into an interactive shell in the box instead of running the agent (same isolation and egress boundary)")
+	rm := fs.Bool("rm", false, "tear the box and its network down when the run (or shell) exits, leaving nothing behind (ephemeral)")
 	agent := fs.String("agent", "claude-code", "which agent policy pack to run (e.g. claude-code, gemini-cli, codex)")
 	image := fs.String("image", "", "override the box image (e.g. runclave/all:latest, the combined image with every agent CLI); default is the agent's own minimal image")
 	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
@@ -918,7 +921,11 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *shell {
-		fmt.Fprintf(stdout, "  box up. dropping you into a shell (type 'exit' to leave; the box persists)...\n")
+		persistNote := "the box persists"
+		if *rm {
+			persistNote = "the box is torn down on exit (--rm)"
+		}
+		fmt.Fprintf(stdout, "  box up. dropping you into a shell (type 'exit' to leave; %s)...\n", persistNote)
 	} else {
 		fmt.Fprintf(stdout, "  executing lifecycle...\n")
 	}
@@ -930,24 +937,38 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "failed", -1, -1, loginShared...)
 		return 1
 	}
-	if *shell {
-		fmt.Fprintf(stdout, "  shell session ended (box persists; `runclave destroy %s` to remove)\n", name)
-	} else {
-		fmt.Fprintf(stdout, "  box up (egress via gateway proxy)\n")
-	}
 	if brokerSock != "" {
 		// Honest lifetime: the broker served the agent's git DURING this run and
-		// stops now, on return. The box is detached and persists; if you re-enter it
-		// later, git is not brokered until you run through runclave again.
-		fmt.Fprintf(stdout, "  git broker: served this run; stops now (box persists without it)\n")
+		// stops now, on return. The box is detached; if it persists and you re-enter
+		// it later, git is not brokered until you run through runclave again.
+		fmt.Fprintf(stdout, "  git broker: served this run; stops now\n")
 	}
-	// Real egress counts from the gateway's own log (the box's only route out), so
-	// the receipt reports what actually happened instead of "unknown".
+	// Read the real egress counts from the gateway's own log BEFORE any teardown (the
+	// gateway must still exist), so the receipt reports what actually happened.
 	egAllow, egDeny := gatewayEgressCounts(lc.GatewayName)
 	if egAllow >= 0 {
 		fmt.Fprintf(stdout, "  egress: %d allowed, %d denied (from the gateway log)\n", egAllow, egDeny)
 	}
-	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), "persisted", egAllow, egDeny, loginShared...)
+	// --rm: ephemeral run. Tear the box, gateway and net down so nothing is left
+	// behind. The disposition is recorded as "destroyed", and the receipt (signed) is
+	// the only artifact that outlives the box.
+	disposition := "persisted"
+	if *rm {
+		if derr := lc.Destroy(box.ExecRunner{}); derr != nil {
+			fmt.Fprintf(stderr, "runclave: teardown: %v\n", derr)
+		}
+		disposition = "destroyed"
+		if *shell {
+			fmt.Fprintf(stdout, "  shell session ended; box torn down (--rm), nothing left behind\n")
+		} else {
+			fmt.Fprintf(stdout, "  run complete; box torn down (--rm), nothing left behind\n")
+		}
+	} else if *shell {
+		fmt.Fprintf(stdout, "  shell session ended (box persists; `runclave destroy %s` to remove)\n", name)
+	} else {
+		fmt.Fprintf(stdout, "  box up (egress via gateway proxy; `runclave destroy %s` to remove)\n", name)
+	}
+	writeRunReceipt(stdout, name, pol, rawPol, drv.Name(), disposition, egAllow, egDeny, loginShared...)
 	return 0
 }
 

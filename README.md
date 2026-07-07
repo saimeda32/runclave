@@ -122,6 +122,9 @@ Flags for `runclave .`:
 --shell            drop into an interactive shell in the box instead of running the
                    agent. Same clone, same egress boundary, same login. Type exit to
                    leave; the box persists.
+--rm               tear the box and its network down when the run (or shell) exits,
+                   so a one-shot run leaves nothing behind. The signed receipt is the
+                   only artifact that outlives the box.
 --login            mount this agent's existing host login read-only so it starts
                    logged in. Off by default. Shares a long-lived credential, so it
                    warns and records it on the receipt.

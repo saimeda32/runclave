@@ -251,8 +251,18 @@ func TestDestroyRemovesBoxAndNet(t *testing.T) {
 	if !strings.Contains(joined, "docker rm -f runclave-proj") {
 		t.Fatalf("destroy must force-remove the box: %s", joined)
 	}
+	if !strings.Contains(joined, "docker rm -f "+p.GatewayName) {
+		t.Fatalf("destroy must also remove the gateway (else it and the net leak): %s", joined)
+	}
 	if !strings.Contains(joined, "docker network rm runclave-net-runclave-proj") {
 		t.Fatalf("destroy must remove the internal net: %s", joined)
+	}
+	// Both containers must be removed BEFORE the net, or `network rm` fails.
+	boxIdx := strings.Index(joined, "rm -f runclave-proj|")
+	gwIdx := strings.Index(joined, "rm -f "+p.GatewayName)
+	netIdx := strings.Index(joined, "network rm ")
+	if !(boxIdx < netIdx && gwIdx < netIdx) {
+		t.Fatalf("box and gateway must be removed before the net: %s", joined)
 	}
 }
 
