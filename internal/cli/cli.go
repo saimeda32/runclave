@@ -43,6 +43,8 @@ Usage:
   runclave export <box> <path> [dst]  copy a file out of a box (explicit; never automatic)
   runclave destroy <box>     tear down a box (box, gateway, and its network)
   runclave ls                list running runclave boxes
+  runclave snapshot <box>    commit a box to a reusable image (fork/rollback via --image)
+  runclave pause <box>       freeze an idle box's processes (undo with runclave resume)
   runclave doctor            check docker + images are ready (and not stale)
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
@@ -114,6 +116,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdOpen(rest, stdout, stderr)
 	case "ls":
 		return cmdLs(rest, stdout, stderr)
+	case "snapshot":
+		return cmdSnapshot(rest, stdout, stderr)
+	case "pause":
+		return cmdPauseResume(rest, stdout, stderr, true)
+	case "resume":
+		return cmdPauseResume(rest, stdout, stderr, false)
 	case "doctor":
 		return cmdDoctor(rest, stdout, stderr)
 	case "export":
@@ -235,6 +243,74 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave open: launching %s failed: %v\n  open this URI manually: %s\n", binary, err, uri)
 		return 1
 	}
+	return 0
+}
+
+// runclaveBoxExists reports whether a container by this name exists and is a
+// runclave box (name prefix). Returns the running-state too.
+func runclaveBoxExists(name string) (running, ok bool) {
+	if !strings.HasPrefix(name, "runclave-") {
+		return false, false
+	}
+	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", name).Output()
+	if err != nil {
+		return false, false
+	}
+	return strings.TrimSpace(string(out)) == "true", true
+}
+
+// cmdSnapshot commits a box's filesystem to a reusable image, so you can fork or
+// roll back to it later with `runclave . --image <tag>`. The CubeSandbox
+// snapshot/clone idea, done with docker commit (coarser than CoW, but real).
+func cmdSnapshot(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "usage: runclave snapshot <box> [image-tag]")
+		return 2
+	}
+	boxName := args[0]
+	if _, ok := runclaveBoxExists(boxName); !ok {
+		fmt.Fprintf(stderr, "runclave snapshot: no runclave box %q\n", boxName)
+		return 1
+	}
+	tag := "runclave/snap-" + strings.TrimPrefix(boxName, "runclave-") + ":latest"
+	if len(args) >= 2 {
+		tag = args[1]
+	}
+	// A committed image can carry secrets the agent wrote to disk - the user's own
+	// artifact, but worth flagging so a snapshot isn't shared unthinkingly.
+	out, err := exec.Command("docker", "commit", boxName, tag).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave snapshot: %v\n%s", err, strings.TrimSpace(string(out)))
+		return 1
+	}
+	fmt.Fprintf(stdout, "snapshot: %s -> %s\n", boxName, tag)
+	fmt.Fprintf(stdout, "  fork/rollback from it:  runclave . --image %s\n", tag)
+	fmt.Fprintf(stdout, "  note: the image may contain anything the agent wrote to disk; don't share it blindly\n")
+	return 0
+}
+
+// cmdPauseResume freezes or unfreezes a box's processes (docker pause/unpause), so
+// an idle box costs nothing while keeping its state - the AutoPause idea, manual.
+func cmdPauseResume(args []string, stdout, stderr io.Writer, pause bool) int {
+	verb, dockerVerb := "resume", "unpause"
+	if pause {
+		verb, dockerVerb = "pause", "pause"
+	}
+	if len(args) < 1 {
+		fmt.Fprintf(stderr, "usage: runclave %s <box>\n", verb)
+		return 2
+	}
+	boxName := args[0]
+	if _, ok := runclaveBoxExists(boxName); !ok {
+		fmt.Fprintf(stderr, "runclave %s: no runclave box %q\n", verb, boxName)
+		return 1
+	}
+	out, err := exec.Command("docker", dockerVerb, boxName).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave %s: %v\n%s", verb, err, strings.TrimSpace(string(out)))
+		return 1
+	}
+	fmt.Fprintf(stdout, "%sd %s\n", verb, boxName)
 	return 0
 }
 
