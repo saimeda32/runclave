@@ -15,6 +15,7 @@ It's meant to be neutral. It doesn't care which agent you run, and it isn't tied
 - [Commands and flags](#commands-and-flags)
 - [How it works](#how-it-works)
 - [Giving the agent its login](#giving-the-agent-its-login)
+- [Keeping the token out of the box](#keeping-the-token-out-of-the-box)
 - [The git credential broker](#the-git-credential-broker)
 - [Policy packs](#policy-packs)
 - [What's enforced](#whats-enforced)
@@ -24,7 +25,7 @@ It's meant to be neutral. It doesn't care which agent you run, and it isn't tied
 
 ## Status
 
-Early, but the core works. The Docker path runs end to end today: `runclave .` in a repo will build a box, clone the repo inside it (history plus your staged, unstaged and untracked changes), stand up the egress proxy, and give the box a network with no route to the internet except through that proxy. It's tested against a live daemon, and the box genuinely cannot reach anything off the allowlist.
+The core works and the Docker path runs end to end today: `runclave .` in a repo will build a box, clone the repo inside it (history plus your staged, unstaged and untracked changes), stand up the egress proxy, and give the box a network with no route to the internet except through that proxy. It's tested against a live daemon, and the box genuinely cannot reach anything off the allowlist.
 
 What's built and tested:
 
@@ -32,17 +33,19 @@ What's built and tested:
 - the internal-network plus gateway-proxy egress boundary, enforced by runclave's own provisioning: in a real run a disallowed host gets a 403 and only the pack's allowlist gets through
 - a full authenticated run proven end to end: GitHub Copilot, logged in with a real token, ran a task in an isolated box and made the change, reaching only allowlisted hosts, with a signed receipt
 - the two-payload workspace seed, so the box's `git status` matches your laptop
-- four agents so far, Claude Code, the Gemini CLI, the OpenAI Codex CLI, and the GitHub Copilot CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
-- passing the agent's auth token into the box by name (never on an argv)
-- the opt-in `--login` mount that reuses your existing host login
+- four agents, Claude Code, the Gemini CLI, the OpenAI Codex CLI, and the GitHub Copilot CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
+- passing the agent's auth token into the box by name (never on an argv), and the opt-in `--login` mount that reuses your existing host login
+- credential injection at the gateway, so the real token can stay in the gateway and never enter the box at all; verified end to end (the box sends a placeholder, the upstream sees the real value). See [Keeping the token out of the box](#keeping-the-token-out-of-the-box)
+- box lifecycle: `snapshot` a box to a reusable image, `pause`/`resume`, `ls` the running boxes, `doctor` to check your setup and spot stale images, and `open` to attach VS Code or Cursor
 - the git credential broker daemon and its in-box helper, auto-started by `runclave .` on a per-session socket
+- real egress allow/deny counts read from the gateway log onto the signed receipt
 
 What's still in progress, stated honestly rather than glossed:
 
 - verifying the broker socket bind-mount end to end on the macOS Docker VM (it works on native Linux docker; the path resolution is settled on both)
-- more agent packs (Copilot, Cursor, Aider); the model is proven with three, the rest is catalog work
-- the Apple `container` backend on macOS and the bubblewrap backend on Linux
-- reading real allow and deny counts out of the gateway log (the receipt records them as unknown until then)
+- more agent packs (Cursor, Aider); the model is proven with four, the rest is catalog work
+- the Apple `container` backend on macOS is written (a real VM, with an in-guest firewall standing in for the Docker `--internal` network) but not yet live-verified; the bubblewrap backend on Linux is still planned
+- auto-wiring credential injection into `runclave .` per agent (landing the gateway CA into each box's trust store and handing the agent a placeholder); today you turn injection on with flags on `runclave proxy`
 
 ## Requirements
 
@@ -63,7 +66,7 @@ make images    # builds the container images: base, gateway, and the per-agent i
 
 - `runclave/base` is the workspace base (git plus the runclave binary, non-root).
 - `runclave/gateway` runs the allowlist proxy.
-- `runclave/claude-code` and `runclave/gemini-cli` are the base plus one agent CLI each, so the box needs no network to install the agent.
+- `runclave/claude-code`, `runclave/gemini-cli`, `runclave/codex` and `runclave/copilot` are the base plus one agent CLI each, so the box needs no network to install the agent.
 
 You only need to run `make images` once per machine, or again after you change a Dockerfile.
 
@@ -107,13 +110,19 @@ This prints the exact sequence of commands runclave would run, including the net
 ```
 runclave .                 provision a box for the current repo and run the agent
 runclave run <agent>       run a named agent headless
+runclave ls                list the running boxes (not the gateway sidecars)
 runclave backends          list detected isolation backends, strongest first
+runclave doctor            check the setup (daemon, images) and flag stale images
 runclave policy <agent>    validate and print an agent policy pack
-runclave destroy <box>     tear a box down
+runclave snapshot <box>    commit a box to a reusable image for --image
+runclave pause <box>       freeze a box's processes; resume with runclave resume
+runclave resume <box>      unfreeze a paused box
 runclave open <box>        attach VS Code or Cursor to a running box (the code . experience)
+runclave destroy <box>     tear a box down (box, gateway, and its network)
 runclave verify <receipt>  check a signed receipt (.dsse.json) offline; fails on tamper
 runclave brokerd           host-side git credential daemon (see the broker section)
 runclave credential <op>   in-box git credential helper (runclave runs this for you)
+runclave version           print the build version
 ```
 
 Flags for `runclave .`:
@@ -175,6 +184,23 @@ The agent's own login (Claude Code talking to Anthropic, and so on) can't be bro
 3. Mounting your whole home or config directory yourself. Don't. It hands the box far more than the login, and it defeats the isolation that's the reason to use runclave at all.
 
 The ranking matters: option 1 keeps the credential off every visible surface, option 2 trades some of that for zero setup, option 3 throws the isolation away. Pick the strongest one that fits how you work.
+
+## Keeping the token out of the box
+
+Passing the token in by name keeps it off every visible surface, but the value still ends up in the box's process environment, because the agent reads it to authenticate. For the git side, the broker already avoids that. For the agent's own provider token, the gateway can go one step further and inject it, so the real secret never enters the box at all.
+
+The gateway holds the real token and, for the specific hosts you name, terminates the box's TLS with an ephemeral CA it generates itself, overwrites the credential header with the real value, and forwards the request on. The box only ever carries a placeholder. The gateway's CA private key never leaves the gateway; only its certificate is handed to the box so the box can trust the interception. Injection is never a bypass: every injected host must already be on the egress allowlist, or the gateway refuses to start.
+
+Today this is a capability of the gateway itself:
+
+```sh
+export ANTHROPIC_TOKEN='sk-ant-...'
+runclave proxy --allow api.anthropic.com \
+  --inject-host api.anthropic.com --inject-header Authorization \
+  --inject-value-env ANTHROPIC_TOKEN --inject-ca-out /shared/ca.pem
+```
+
+The real value is read from the named environment variable, never from an argv, and it is never logged. This path is verified end to end: with the box sending a placeholder header, the upstream receives the injected value and the placeholder never leaves the boundary. What isn't done yet is auto-wiring it into `runclave .` per agent, meaning landing that CA into each box image's trust store and handing the agent the placeholder automatically; until then you wire the gateway yourself.
 
 ## The git credential broker
 
@@ -264,10 +290,10 @@ The private key is generated once and kept owner-only in your config dir; only t
 
 Being straight about the edges:
 
-- It is not a kernel sandbox. On Docker the box is a container; a kernel-level container escape is out of scope for this layer. The Apple `container` backend (a real VM) is the stronger option and is planned.
+- It is not a kernel sandbox. On Docker the box is a container; a kernel-level container escape is out of scope for this layer. The Apple `container` backend (a real VM) is the stronger option; it's written but not yet live-verified.
 - The allowlist is by hostname. If a host you allow can itself be used to reach somewhere else (an open redirect, a proxy, a shared CDN), the agent can ride that. Keep the allowlist tight.
-- With `--login`, or with a token in the environment, the credential is inside the box for the agent to use. runclave keeps it off visible surfaces and, for git, replaces it with a short-lived brokered token, but a live credential the agent can use is a credential a compromised agent can use. Rotate if you have any doubt.
-- Egress accounting isn't wired to the gateway log yet, so the allow and deny counts on the receipt read as unknown for now.
+- With `--login`, or with a token in the environment, the credential is inside the box for the agent to use. runclave keeps it off visible surfaces and, for git, replaces it with a short-lived brokered token; gateway credential injection can keep the agent's own token out of the box entirely for hosts you inject. But a live credential the agent can use is a credential a compromised agent can use, and even with injection the box still has authenticated *use* of the host. Rotate if you have any doubt.
+- The hostname allowlist is matched on the CONNECT target, not the TLS SNI. A box that sends an allowlisted CONNECT host but a different inner SNI (domain fronting) is a known gap, not a defended case.
 
 None of this is hidden in the code either. Where something is advisory rather than enforced, the comments say so.
 
