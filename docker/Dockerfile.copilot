@@ -1,0 +1,24 @@
+# Box image for the copilot pack: the runclave base plus the GitHub Copilot CLI.
+# The CLI is installed at build time (unpinned -> whatever is latest then; the pack's
+# flags were observed on GitHub Copilot CLI 1.0.67). The box thus needs no network to
+# install itself. At run time copilot reaches api.github.com + the Copilot model API
+# (api.enterprise.githubcopilot.com / api.githubcopilot.com) through the gateway proxy,
+# which the copilot pack already allows.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o /runclave ./cmd/runclave
+
+FROM node:20-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @github/copilot \
+    && useradd -u 10001 -m runclave \
+    && mkdir -p /seed /run/runclave && chown 10001:10001 /seed /run/runclave
+COPY --from=build /runclave /usr/local/bin/runclave
+USER 10001
+WORKDIR /home/runclave
+CMD ["sleep", "infinity"]

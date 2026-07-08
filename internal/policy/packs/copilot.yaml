@@ -1,0 +1,61 @@
+# GitHub Copilot CLI policy pack - the fourth agent.
+# OBSERVED by running the CLI (GitHub Copilot CLI 1.0.67): command `copilot`, `-p`
+# is non-interactive (the prompt is -p's value), `--allow-all` auto-approves tools
+# (the box is the boundary). Auth token order is COPILOT_GITHUB_TOKEN > GH_TOKEN >
+# GITHUB_TOKEN. The egress hosts below were captured through the gateway proxy with a
+# real token: api.github.com (token validation) and api.enterprise.githubcopilot.com
+# (the model API for a Copilot ENTERPRISE account) were ALLOW; telemetry was DENY and
+# the CLI still worked. api.githubcopilot.com is INFERRED for individual accounts.
+#
+# Auth note: the Copilot CLI stores its login in the OS KEYCHAIN (macOS) - NOT a file
+# under ~/.copilot - so `--login` can't carry it. Authenticate the box with the env
+# token instead (COPILOT_GITHUB_TOKEN); on macOS that value lives in the login
+# keychain (service "copilot-cli"). That is why this pack has no loginPaths.
+# This file is DATA, not code (criterion P4): no executable hooks.
+agent: copilot
+scope: local
+type: cli-headless
+
+run:
+  image: runclave/copilot:latest
+  command: copilot
+  headlessFlags: ["--allow-all", "-p"]
+  shell: bash # the copilot image (node:20-bookworm-slim) ships bash
+  containerEnv:
+    COPILOT_AUTO_UPDATE: "false" # no auto-update fetches from inside the box
+
+egress:
+  # model/auth endpoints - allow (criterion E7)
+  model:
+    - api.github.com                    # OBSERVED: token validation / GitHub API
+    - api.enterprise.githubcopilot.com  # OBSERVED: Copilot Enterprise model API
+    - api.githubcopilot.com             # inferred: individual-account model API
+  # infra the agent legitimately needs
+  infra:
+    - github.com # brokered `git push` reaches the origin (else the proxy denies it)
+  # telemetry: denied by default (the CLI works without it, confirmed live).
+  telemetry_deny:
+    - telemetry.enterprise.githubcopilot.com
+    - telemetry.individual.githubcopilot.com
+
+auth:
+  # The token is env-only here because Copilot stores its login in the OS keychain,
+  # not a mountable file (see the header note). COPILOT_GITHUB_TOKEN is checked first.
+  method: env-token
+  envVar: COPILOT_GITHUB_TOKEN
+  deviceFlow: false
+
+paths:
+  # CODEX_HOME-style relocation for Copilot's state dir (descriptive; not yet enforced).
+  relocateEnv: COPILOT_HOME
+
+mcp:
+  configPath: "~/.copilot/mcp-config.json"
+  # Never auto-trust a repo-provided MCP config (criterion P5).
+  consentPolicy: outside-repo
+
+nativeSandbox:
+  # Copilot's own tool-approval is turned off via --allow-all in headlessFlags because
+  # the box is the boundary; this field is descriptive (the real flag is in headlessFlags).
+  mode: disable
+  disableFlag: ""

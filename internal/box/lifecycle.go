@@ -361,6 +361,15 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 				Argv: []string{"git", "config", "--global", "credential.useHttpPath", "true"}},
 		)
 	}
+	// Wait for the gateway proxy to actually accept connections BEFORE the agent
+	// runs. The gateway container starts detached, but `runclave proxy` needs a
+	// moment to bind its port; the seed steps are fast, so without this the agent's
+	// first request races the proxy and fails with a network error. The probe runs
+	// in the box (which can reach the gateway) via the runclave binary already there.
+	if proxyAddr != "" {
+		steps = append(steps, Step{Desc: "wait for the gateway proxy to be ready", InBox: true,
+			Argv: []string{"runclave", "probe", proxyAddr}})
+	}
 	// Exec the agent, egress pointed at the proxy via env (the convenience layer;
 	// the ACTUAL chokepoint is the internal-net gateway). This is REAL now, not a
 	// Desc string: HTTP(S)_PROXY are injected into the exec env.
@@ -764,7 +773,13 @@ func (p Plan) Execute(r Runner) error {
 				continue
 			}
 		}
-		if _, err := r.Run(argv); err != nil {
+		out, err := r.Run(argv)
+		if err != nil {
+			// Surface the step's own output (e.g. the agent's error) instead of just
+			// "exit status 1" - otherwise a failure inside the box is undiagnosable.
+			if trimmed := strings.TrimSpace(out); trimmed != "" {
+				return fmt.Errorf("box: step %q failed: %w\n--- output ---\n%s", s.Desc, err, trimmed)
+			}
 			return fmt.Errorf("box: step %q failed: %w", s.Desc, err)
 		}
 	}

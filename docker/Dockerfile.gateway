@@ -12,4 +12,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o /runclave ./c
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /runclave /usr/local/bin/runclave
 USER nonroot
-ENTRYPOINT ["runclave", "proxy"]
+# NO entrypoint on purpose: the runclave lifecycle runs this image with the FULL
+# command `runclave proxy --addr ... --allow ...`. An `ENTRYPOINT ["runclave","proxy"]`
+# would PREPEND to that, giving `runclave proxy runclave proxy --addr ...` - Go's flag
+# parser stops at the first positional, so --addr/--allow are dropped and the proxy
+# binds loopback with an EMPTY allowlist (box can't reach it; nothing is allowed).
