@@ -110,6 +110,7 @@ runclave run <agent>       run a named agent headless
 runclave backends          list detected isolation backends, strongest first
 runclave policy <agent>    validate and print an agent policy pack
 runclave destroy <box>     tear a box down
+runclave open <box>        attach VS Code or Cursor to a running box (the code . experience)
 runclave verify <receipt>  check a signed receipt (.dsse.json) offline; fails on tamper
 runclave brokerd           host-side git credential daemon (see the broker section)
 runclave credential <op>   in-box git credential helper (runclave runs this for you)

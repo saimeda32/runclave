@@ -25,6 +25,7 @@ import (
 	"github.com/saimeda/runclave/internal/box"
 	"github.com/saimeda/runclave/internal/broker"
 	"github.com/saimeda/runclave/internal/egress"
+	"github.com/saimeda/runclave/internal/ide"
 	"github.com/saimeda/runclave/internal/ledger"
 	"github.com/saimeda/runclave/internal/policy"
 	"github.com/saimeda/runclave/internal/session"
@@ -42,6 +43,7 @@ Usage:
   runclave policy <agent>    validate and print an agent policy pack
   runclave export <src> [dst] pull a named artifact out of the box (never automatic)
   runclave destroy <box>     tear down a box (prompts to save /out)
+  runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
   runclave brokerd           host-side credential daemon: lends short-lived, repo-scoped git tokens to a box
   runclave credential <op>   in-box git credential helper (talks to the broker; not run by hand)
@@ -97,6 +99,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdVerify(rest, stdout, stderr)
 	case "probe":
 		return cmdProbe(rest, stdout, stderr)
+	case "open":
+		return cmdOpen(rest, stdout, stderr)
 	case "export":
 		fmt.Fprintf(stderr, "runclave: %q not yet implemented\n", cmd)
 		return 1
@@ -104,6 +108,99 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave: unknown command %q\n\n%s", cmd, usage)
 		return 2
 	}
+}
+
+// defaultWorkspacePath returns the in-box repo path for a box named runclave-<repo>.
+// The seed clones the repo to BoxHome/<repo>, so that is where the editor should open.
+func defaultWorkspacePath(boxName string) string {
+	return box.BoxHome + "/" + strings.TrimPrefix(boxName, "runclave-")
+}
+
+// pickIDE resolves the requested IDE (or autodetects) to (kind, binary-on-PATH).
+// binary is "" when no CLI is found, so the caller can fall back to printing the URI.
+func pickIDE(want string) (ide.Kind, string) {
+	find := func(bin string) string {
+		if p, err := exec.LookPath(bin); err == nil {
+			return p
+		}
+		return ""
+	}
+	switch want {
+	case "cursor":
+		return ide.Cursor, find("cursor")
+	case "vscode", "code", "":
+		if b := find("code"); b != "" {
+			return ide.VSCode, b
+		}
+		if want == "" { // autodetect: fall back to cursor if code is absent
+			if b := find("cursor"); b != "" {
+				return ide.Cursor, b
+			}
+		}
+		return ide.VSCode, ""
+	default:
+		return ide.VSCode, ""
+	}
+}
+
+// cmdOpen attaches the user's editor (VS Code or Cursor) to a RUNNING box - the
+// `code .` experience against the sandbox. It builds the vscode-remote:// attach URI
+// and hands it to the IDE CLI. This is a CONTROL channel only: the box's isolation
+// and egress boundary were established at creation and are unchanged; the editor
+// server runs INSIDE the box, and attaching adds no host mount or network path.
+func cmdOpen(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("open", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	ideFlag := fs.String("ide", "", "which IDE: vscode|cursor (default: autodetect code/cursor on PATH)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "usage: runclave open [--ide vscode|cursor] <box> [in-box-path]")
+		return 2
+	}
+	boxName := fs.Arg(0)
+	// The box must be running; also grab its id (Cursor keys attach on the id).
+	out, err := exec.Command("docker", "inspect", "-f", "{{.Id}} {{.State.Running}}", boxName).Output()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave open: no such box %q (bring one up with `runclave .`)\n", boxName)
+		return 1
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) != 2 || fields[1] != "true" {
+		fmt.Fprintf(stderr, "runclave open: box %q is not running\n", boxName)
+		return 1
+	}
+	id := fields[0]
+	wp := defaultWorkspacePath(boxName)
+	if fs.NArg() >= 2 {
+		wp = fs.Arg(1)
+	}
+	kind, binary := pickIDE(*ideFlag)
+	if binary == "" {
+		uri, uerr := ide.AttachURI(kind, boxName, id, wp)
+		if uerr != nil {
+			fmt.Fprintf(stderr, "runclave open: %v\n", uerr)
+			return 1
+		}
+		fmt.Fprintf(stdout, "No code/cursor CLI found on PATH. Open this in your editor (Dev Containers / Remote):\n  %s\n", uri)
+		return 0
+	}
+	argv, err := ide.AttachArgv(kind, binary, boxName, id, wp)
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave open: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "runclave: attaching %s to the isolated box %s at %s\n", filepath.Base(binary), boxName, wp)
+	fmt.Fprintf(stdout, "  control channel only: the box's isolation and egress boundary are unchanged; the editor server runs inside the box\n")
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		uri, _ := ide.AttachURI(kind, boxName, id, wp)
+		fmt.Fprintf(stderr, "runclave open: launching %s failed: %v\n  open this URI manually: %s\n", binary, err, uri)
+		return 1
+	}
+	return 0
 }
 
 // cmdProbe waits until a TCP address accepts connections (or times out). It runs

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/saimeda/runclave/internal/box"
+	"github.com/saimeda/runclave/internal/ide"
 	"github.com/saimeda/runclave/internal/policy"
 )
 
@@ -183,6 +184,30 @@ func TestReceiptRecordsEffectiveImage(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"image"`) || !strings.Contains(string(data), "runclave/all:latest") {
 		t.Fatalf("receipt must record the effective image, got: %s", data)
+	}
+}
+
+// `runclave open` opens the cloned-repo path in the box: BoxHome/<repo>, where
+// <repo> is the box name minus the runclave- prefix.
+func TestDefaultWorkspacePath(t *testing.T) {
+	if got := defaultWorkspacePath("runclave-myproj"); got != box.BoxHome+"/myproj" {
+		t.Fatalf("workspace path %q, want %s/myproj", got, box.BoxHome)
+	}
+	// And that path builds a valid, decodable VS Code attach URI for the box.
+	uri, err := ide.AttachURI(ide.VSCode, "runclave-myproj", "deadbeef", defaultWorkspacePath("runclave-myproj"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(uri, "vscode-remote://attached-container+") || !strings.HasSuffix(uri, box.BoxHome+"/myproj") {
+		t.Fatalf("unexpected attach URI: %s", uri)
+	}
+	auth := strings.TrimSuffix(strings.TrimPrefix(uri, "vscode-remote://"), box.BoxHome+"/myproj")
+	m, err := ide.DecodeAuthority(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["containerName"] != "/runclave-myproj" {
+		t.Fatalf("authority must encode the container name, got %v", m)
 	}
 }
 
