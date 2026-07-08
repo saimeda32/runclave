@@ -58,16 +58,31 @@ type Pack struct {
 		LoginPaths []string `yaml:"loginPaths"`
 	} `yaml:"auth"`
 
+	// Paths, MCP and NativeSandbox are DESCRIPTIVE: they document the agent's
+	// credential/config/sandbox surface for pack authors and future work. runclave
+	// does NOT apply them as per-field controls today - the actual enforcement is the
+	// box itself (a fresh disposable home with no host filesystem) plus the egress
+	// allowlist. So e.g. credential hotspots are protected by their absence in the
+	// box, not by an in-box deny-read; the agent's own sandbox is turned off via
+	// run.headlessFlags (the box is the boundary), which nativeSandbox merely records.
 	Paths struct {
-		RelocateEnv        string   `yaml:"relocateEnv"`
+		// RelocateEnv names the agent's config-dir override (e.g. CODEX_HOME).
+		// Descriptive only: not injected. In the box the agent's home is already a
+		// fresh dir, so relocation adds nothing, and it would fight --login mounts.
+		RelocateEnv string `yaml:"relocateEnv"`
+		// CredentialHotspots are host paths that hold this agent's secrets - useful to
+		// know, but protected by ABSENCE in the box, not by an enforced deny-read.
 		CredentialHotspots []string `yaml:"credentialHotspots"`
 	} `yaml:"paths"`
 
 	MCP struct {
 		ConfigPath    string `yaml:"configPath"`
-		ConsentPolicy string `yaml:"consentPolicy"` // "outside-repo"
+		ConsentPolicy string `yaml:"consentPolicy"` // "outside-repo" (descriptive)
 	} `yaml:"mcp"`
 
+	// NativeSandbox records that the agent has its own sandbox and how it's turned
+	// off. The turn-off actually happens via run.headlessFlags; these fields document
+	// it, they are not applied by runclave. DisableFlag is descriptive.
 	NativeSandbox struct {
 		Mode        string `yaml:"mode"` // disable|passthrough|approval-only|own-runtime
 		DisableFlag string `yaml:"disableFlag"`

@@ -804,7 +804,11 @@ func cmdPolicy(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  egress allowlist (%d): %v\n", len(p.AllowedDomains()), p.AllowedDomains())
 	fmt.Fprintf(stdout, "  telemetry denied: %v\n", p.Egress.TelemetryDeny)
 	fmt.Fprintf(stdout, "  auth: %s (%s)\n", p.Auth.Method, p.Auth.EnvVar)
-	fmt.Fprintf(stdout, "  native sandbox: %s\n", p.NativeSandbox.Mode)
+	// nativeSandbox/paths/mcp are DESCRIPTIVE (see policy.Pack): the actual controls
+	// are the box (fresh home, no host FS) + the egress allowlist. Label it so the
+	// output doesn't read as "runclave enforces this".
+	fmt.Fprintf(stdout, "  agent's own sandbox: %s (via run flags; descriptive)\n", p.NativeSandbox.Mode)
+	fmt.Fprintf(stdout, "  enforcement: box isolation (fresh home, no host FS) + the egress allowlist above\n")
 	return 0
 }
 
