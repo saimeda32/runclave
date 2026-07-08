@@ -159,19 +159,40 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: runclave open [--ide vscode|cursor] <box> [in-box-path]")
 		return 2
 	}
+	// Validate --ide instead of silently falling back to vscode on a typo.
+	switch *ideFlag {
+	case "", "vscode", "code", "cursor":
+	default:
+		fmt.Fprintf(stderr, "runclave open: unknown --ide %q (use vscode or cursor)\n", *ideFlag)
+		return 2
+	}
 	boxName := fs.Arg(0)
-	// The box must be running; also grab its id (Cursor keys attach on the id).
-	out, err := exec.Command("docker", "inspect", "-f", "{{.Id}} {{.State.Running}}", boxName).Output()
+	// The box must be running; grab its id (Cursor keys attach on the id) and the
+	// networks it's on, so we can confirm this is a RUNCLAVE box before claiming it's
+	// isolated. Attaching to some arbitrary container and printing "isolated box,
+	// egress unchanged" would be a false guarantee.
+	out, err := exec.Command("docker", "inspect", "-f",
+		"{{.Id}}|{{.State.Running}}|{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}", boxName).Output()
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave open: no such box %q (bring one up with `runclave .`)\n", boxName)
 		return 1
 	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	if len(fields) != 2 || fields[1] != "true" {
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 3)
+	if len(parts) != 3 || parts[1] != "true" {
 		fmt.Fprintf(stderr, "runclave open: box %q is not running\n", boxName)
 		return 1
 	}
-	id := fields[0]
+	id := parts[0]
+	onRunclaveNet := false
+	for _, n := range strings.Fields(parts[2]) {
+		if strings.HasPrefix(n, "runclave-net-") {
+			onRunclaveNet = true
+		}
+	}
+	if !onRunclaveNet {
+		fmt.Fprintf(stderr, "runclave open: %q is not a runclave box (not on a runclave-net-* network); refusing to attach and claim isolation it may not have\n", boxName)
+		return 1
+	}
 	wp := defaultWorkspacePath(boxName)
 	if fs.NArg() >= 2 {
 		wp = fs.Arg(1)
