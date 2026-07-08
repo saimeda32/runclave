@@ -28,10 +28,11 @@ Early, but the core works. The Docker path runs end to end today: `runclave .` i
 
 What's built and tested:
 
-- the one-command `runclave .` flow on Docker or Colima, headless or `--shell` interactive
-- the internal-network plus gateway-proxy egress boundary, with a pre-flight check that refuses to run if the boundary isn't intact
+- the one-command `runclave .` flow on Docker or Colima, headless or `--shell` interactive, with an optional task prompt
+- the internal-network plus gateway-proxy egress boundary, enforced by runclave's own provisioning: in a real run a disallowed host gets a 403 and only the pack's allowlist gets through
+- a full authenticated run proven end to end: GitHub Copilot, logged in with a real token, ran a task in an isolated box and made the change, reaching only allowlisted hosts, with a signed receipt
 - the two-payload workspace seed, so the box's `git status` matches your laptop
-- three agents so far, Claude Code, the Gemini CLI, and the OpenAI Codex CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
+- four agents so far, Claude Code, the Gemini CLI, the OpenAI Codex CLI, and the GitHub Copilot CLI, each a policy pack plus a box image (`--agent` picks one); adding one is a pack and a Dockerfile, no core change
 - passing the agent's auth token into the box by name (never on an argv)
 - the opt-in `--login` mount that reuses your existing host login
 - the git credential broker daemon and its in-box helper, auto-started by `runclave .` on a per-session socket
