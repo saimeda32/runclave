@@ -28,7 +28,6 @@ import (
 	"github.com/saimeda/runclave/internal/ide"
 	"github.com/saimeda/runclave/internal/ledger"
 	"github.com/saimeda/runclave/internal/policy"
-	"github.com/saimeda/runclave/internal/session"
 	"github.com/saimeda/runclave/internal/workspace"
 )
 
@@ -38,10 +37,10 @@ Usage:
   runclave . [flags] [task]  provision a box for the current repo and run the agent, optionally on a
                              task prompt (e.g. runclave . --agent codex "fix the flaky test").
                              Flags must come before the task.
-  runclave run <agent>       run a CLI agent (e.g. claude-code) headless in a box
+  runclave run <agent> [task] run an agent on this repo (alias for the . command with --agent)
   runclave backends          list detected isolation backends, strongest first
   runclave policy <agent>    validate and print an agent policy pack
-  runclave export <src> [dst] pull a named artifact out of the box (never automatic)
+  runclave export <box> <path> [dst]  copy a file out of a box (explicit; never automatic)
   runclave destroy <box>     tear down a box (prompts to save /out)
   runclave ls                list running runclave boxes
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
@@ -113,8 +112,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "ls":
 		return cmdLs(rest, stdout, stderr)
 	case "export":
-		fmt.Fprintf(stderr, "runclave: %q not yet implemented\n", cmd)
-		return 1
+		return cmdExport(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "runclave: unknown command %q\n\n%s", cmd, usage)
 		return 2
@@ -870,61 +868,37 @@ func cmdPolicy(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	wantBackend := fs.String("backend", "", "force a backend")
-	fs.String("policies", "", "explicit dir of on-disk policy packs (opt-in; default: embedded trusted packs)")
-	if err := fs.Parse(args); err != nil {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "usage: runclave run <agent> [flags] [task]")
 		return 2
 	}
-	if fs.NArg() < 1 {
-		fmt.Fprintln(stderr, "usage: runclave run <agent>")
-		return 2
-	}
-	agent := fs.Arg(0)
-	dir := policiesDir(fs)
-	warnIfLocalPacks(dir, stderr)
-	p, err := policy.Find(dir, agent)
-	if err != nil {
-		fmt.Fprintf(stderr, "runclave: %v\n", err)
-		return 1
-	}
-	rawPol, _ := policy.RawBytes(dir, agent)
-	drv, err := backend.Select(*wantBackend)
-	if err != nil {
-		fmt.Fprintf(stderr, "runclave: %v\n", err)
-		return 1
-	}
-	// Real wiring: stand up the egress boundary and the ledger for this run.
-	// The proxy actually listens; egress decisions are recorded; a receipt is
-	// written. What is NOT yet here is the container lifecycle that routes the
-	// box's traffic through ProxyAddr and execs the agent - that is the next
-	// build step, and this output says so honestly.
-	sess, err := session.Start(p, drv, session.Options{RawPolicy: rawPol, ListenProxy: true})
-	if err != nil {
-		fmt.Fprintf(stderr, "runclave: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "session up: %q in a %s (%s) box\n", p.Agent, drv.Name(), drv.Strength())
-	fmt.Fprintf(stdout, "  egress proxy listening: %s (default-deny, %d domains allowed)\n",
-		sess.ProxyAddr(), len(p.AllowedDomains()))
-	fmt.Fprintf(stdout, "  create plan: %v\n", drv.CreateArgs("runclave-"+agent, "runclave/base:latest"))
-	fmt.Fprintf(stdout, "  auth inject: %s\n", p.Auth.EnvVar)
-	fmt.Fprintf(stdout, "  NOT YET WIRED: container lifecycle routing box egress through the proxy\n")
-
-	receipt := filepath.Join(os.TempDir(), "runclave-"+agent+"-receipt.json")
-	// "planned": this path stands up the proxy/ledger but does NOT create or destroy
-	// a box (see the NOT YET WIRED note above). "destroyed" would be an overclaim.
-	r, err := sess.Finish("planned", receipt, "", 0)
-	if err != nil {
-		fmt.Fprintf(stderr, "runclave: receipt: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "receipt written: %s (policy %s…, egress %d/%d allow/deny)\n",
-		receipt, r.PolicyHash[:12], r.EgressAllowed, r.EgressDenied)
-	return 0
+	// `runclave run <agent> ...` is a convenience alias for `runclave . --agent
+	// <agent> ...` - the full isolated lifecycle lives in cmdHere; run just preselects
+	// the agent so `runclave run codex "fix the bug"` reads naturally.
+	return cmdHere(append([]string{"--agent", args[0]}, args[1:]...), stdout, stderr)
 }
 
+// cmdExport pulls an artifact OUT of a box - never automatic, always explicit.
+// `runclave export <box> <path-in-box> [host-dest]` is a thin, safe wrapper over
+// docker cp; host-dest defaults to the current directory.
+func cmdExport(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "usage: runclave export <box> <path-in-box> [host-dest]")
+		return 2
+	}
+	boxName, src := args[0], args[1]
+	dst := "."
+	if len(args) >= 3 {
+		dst = args[2]
+	}
+	out, err := exec.Command("docker", "cp", boxName+":"+src, dst).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave export: %v\n%s", err, strings.TrimSpace(string(out)))
+		return 1
+	}
+	fmt.Fprintf(stdout, "exported %s:%s -> %s\n", boxName, src, dst)
+	return 0
+}
 func cmdHere(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(".", flag.ContinueOnError)
 	fs.SetOutput(stderr)
