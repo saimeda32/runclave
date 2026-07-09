@@ -1,4 +1,4 @@
-.PHONY: build test vet images gateway-image base-image claude-image gemini-image codex-image copilot-image all-image
+.PHONY: build test vet smoke images gateway-image base-image claude-image gemini-image codex-image copilot-image all-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o runclave ./cmd/runclave
@@ -39,3 +39,7 @@ copilot-image:
 # NOT part of `make images` - the default stays minimal per-agent.
 all-image:
 	docker build -f docker/Dockerfile.all -t runclave/all:latest .
+
+# Real-path integration smoke test (needs `make images` + a docker daemon).
+smoke:
+	go test -tags integration -run TestIntegration -v ./internal/box/
