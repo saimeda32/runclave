@@ -41,7 +41,7 @@ Usage:
   runclave backends          list detected isolation backends, strongest first
   runclave policy <agent>    validate and print an agent policy pack
   runclave export <box> <path> [dst]  copy a file out of a box (explicit; never automatic)
-  runclave destroy <box>     tear down a box (prompts to save /out)
+  runclave destroy <box>     tear down a box (box, gateway, and its network)
   runclave ls                list running runclave boxes
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
@@ -53,7 +53,7 @@ Flags:
   --agent <name>     which agent policy pack to run (default claude-code; e.g. gemini-cli)
   --image <ref>      override the box image (e.g. runclave/all, the combined image with
                      every agent CLI); default is the agent's own minimal image
-  --backend <name>   force a backend (apple-container | docker); default: strongest available
+  --backend <name>   force a backend (docker; apple-container planned); default: docker
   --clean            clone HEAD only, without uncommitted working-tree changes
   --shell            drop into an interactive shell in the box instead of running
                      the agent (same isolation and egress boundary)
@@ -249,11 +249,13 @@ func parseLsBoxes(dockerOut string) []lsBox {
 		if len(f) < 3 {
 			continue
 		}
-		name := f[0]
-		if !strings.HasPrefix(name, "runclave-") || strings.HasSuffix(name, "-gw") {
+		name, image := f[0], f[1]
+		// Exclude the gateway sidecars by IMAGE (authoritative), not by a -gw name
+		// suffix - so a repo dir that happens to end in "-gw" isn't hidden.
+		if !strings.HasPrefix(name, "runclave-") || strings.Contains(image, "runclave/gateway") {
 			continue
 		}
-		boxes = append(boxes, lsBox{Name: name, Image: f[1], Age: f[2]})
+		boxes = append(boxes, lsBox{Name: name, Image: image, Age: f[2]})
 	}
 	return boxes
 }
@@ -868,7 +870,13 @@ func cmdPolicy(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		// No agent, or a flag first (e.g. `run --help`): don't treat it as an agent
+		// name. Forward flags straight through so help/errors are sensible.
+		if len(args) >= 1 && (args[0] == "-h" || args[0] == "--help") {
+			fmt.Fprint(stdout, usage)
+			return 0
+		}
 		fmt.Fprintln(stderr, "usage: runclave run <agent> [flags] [task]")
 		return 2
 	}
@@ -929,6 +937,14 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 	if *shell && prompt != "" {
 		fmt.Fprintf(stderr, "runclave: note - --shell ignores the task prompt; you get an interactive shell in the repo instead\n")
 	}
+	// `runclave .` with no task and no --shell: the headless agents want a prompt
+	// (they run `<agent> -p`), so a taskless run would just fail. The right zero-arg
+	// behavior is the `code .` one - drop the user into an interactive shell in the
+	// isolated box. Pass a task to run the agent instead.
+	if prompt == "" && !*shell {
+		fmt.Fprintf(stderr, "runclave: no task given - opening an interactive shell in the box (pass a task to run the agent, e.g. runclave . \"fix the flaky test\")\n")
+		*shell = true
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(stderr, "runclave: %v\n", err)
@@ -961,6 +977,15 @@ func cmdHere(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	rawPol, _ := policy.RawBytes(dir, *agent)
+
+	// Surface an allow-all (`*`) pack to the operator at run time - not just in the
+	// gateway's own logs - so an unrestricted box is never a quiet surprise.
+	for _, d := range pol.AllowedDomains() {
+		if d == "*" {
+			fmt.Fprintf(stderr, "runclave: WARNING - the %s pack allows ALL egress (\"*\"); this box is NOT egress-sandboxed\n", pol.Agent)
+			break
+		}
+	}
 
 	// --image override: run this agent in a different box image (e.g. the combined
 	// runclave/all image that carries every agent CLI). The egress allowlist and all

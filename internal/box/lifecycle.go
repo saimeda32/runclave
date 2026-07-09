@@ -49,6 +49,10 @@ type Step struct {
 	// IsAgentExec marks THE step that runs the agent command, so --shell can find and
 	// rewrite exactly that step instead of assuming it is the last one.
 	IsAgentExec bool
+	// BestEffort: a failure here warns but does not fail the run (used for the gateway
+	// readiness probe, so a stale box image whose runclave binary lacks `probe`
+	// degrades to a small race instead of a hard teardown).
+	BestEffort bool
 	// WorkDir, if set on an in-box step, runs it in that box directory (`docker exec
 	// -w`). The agent (and --shell) run in the cloned repo, not the box home.
 	WorkDir string
@@ -368,7 +372,7 @@ func BuildPlan(name string, drv backend.Driver, pack *policy.Pack, ws workspace.
 	// in the box (which can reach the gateway) via the runclave binary already there.
 	if proxyAddr != "" {
 		steps = append(steps, Step{Desc: "wait for the gateway proxy to be ready", InBox: true,
-			Argv: []string{"runclave", "probe", proxyAddr}})
+			Argv: []string{"runclave", "probe", proxyAddr}, BestEffort: true})
 	}
 	// Exec the agent, egress pointed at the proxy via env (the convenience layer;
 	// the ACTUAL chokepoint is the internal-net gateway). This is REAL now, not a
@@ -775,6 +779,11 @@ func (p Plan) Execute(r Runner) error {
 		}
 		out, err := r.Run(argv)
 		if err != nil {
+			if s.BestEffort {
+				// A best-effort step (the readiness probe) must not tear the box down;
+				// the run continues and any real problem surfaces at the agent step.
+				continue
+			}
 			// Surface the step's own output (e.g. the agent's error) instead of just
 			// "exit status 1" - otherwise a failure inside the box is undiagnosable.
 			if trimmed := strings.TrimSpace(out); trimmed != "" {

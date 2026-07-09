@@ -217,21 +217,24 @@ func TestParseLsBoxes(t *testing.T) {
 	out := "runclave-proj\trunclave/claude-code:latest\t2 minutes ago\n" +
 		"runclave-proj-gw\trunclave/gateway:latest\t2 minutes ago\n" +
 		"runclave-api\trunclave/codex:latest\tabout an hour ago\n" +
+		"runclave-my-gw\trunclave/gemini-cli:latest\t5 minutes ago\n" + // repo named "my-gw": a real box, must NOT be hidden
 		"myrunclave-thing\tsomeimage\t3 days ago\n"
 	boxes := parseLsBoxes(out)
-	if len(boxes) != 2 {
-		t.Fatalf("want 2 boxes (no gateways, no non-runclave), got %d: %+v", len(boxes), boxes)
+	if len(boxes) != 3 {
+		t.Fatalf("want 3 boxes (gateway excluded by image, non-runclave excluded), got %d: %+v", len(boxes), boxes)
 	}
-	if boxes[0].Name != "runclave-proj" || boxes[0].Image != "runclave/claude-code:latest" || boxes[0].Age != "2 minutes ago" {
-		t.Fatalf("first box parsed wrong: %+v", boxes[0])
-	}
-	if boxes[1].Name != "runclave-api" {
-		t.Fatalf("second box should be runclave-api, got %q", boxes[1].Name)
-	}
+	names := map[string]bool{}
 	for _, b := range boxes {
-		if strings.HasSuffix(b.Name, "-gw") {
-			t.Fatalf("gateway sidecar must be excluded: %q", b.Name)
+		names[b.Name] = true
+		if strings.Contains(b.Image, "runclave/gateway") {
+			t.Fatalf("gateway sidecar must be excluded: %+v", b)
 		}
+	}
+	if !names["runclave-proj"] || !names["runclave-api"] || !names["runclave-my-gw"] {
+		t.Fatalf("missing expected boxes (incl. the -gw-named repo): %v", names)
+	}
+	if names["runclave-proj-gw"] || names["myrunclave-thing"] {
+		t.Fatalf("gateway or non-runclave leaked in: %v", names)
 	}
 }
 
