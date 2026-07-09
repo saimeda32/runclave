@@ -43,6 +43,7 @@ Usage:
   runclave export <box> <path> [dst]  copy a file out of a box (explicit; never automatic)
   runclave destroy <box>     tear down a box (box, gateway, and its network)
   runclave ls                list running runclave boxes
+  runclave doctor            check docker + images are ready (and not stale)
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
   runclave version           print the build version
@@ -111,6 +112,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdOpen(rest, stdout, stderr)
 	case "ls":
 		return cmdLs(rest, stdout, stderr)
+	case "doctor":
+		return cmdDoctor(rest, stdout, stderr)
 	case "export":
 		return cmdExport(rest, stdout, stderr)
 	default:
@@ -231,6 +234,80 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// imagePresent reports whether a local docker image exists.
+func imagePresent(img string) bool {
+	return exec.Command("docker", "image", "inspect", img).Run() == nil
+}
+
+// imageRunclaveVersion runs `runclave version` inside an image and returns the
+// version string, or "" if it can't be read. Used to spot a STALE image whose baked
+// binary predates a feature the lifecycle now depends on (e.g. the readiness probe).
+func imageRunclaveVersion(img string) string {
+	out, err := exec.Command("docker", "run", "--rm", "--network", "none", img, "runclave", "version").Output()
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(strings.TrimSpace(string(out)))
+	if len(f) == 2 && f[0] == "runclave" {
+		return f[1]
+	}
+	return ""
+}
+
+// cmdDoctor checks the local setup: docker, the images runclave needs, and whether
+// any agent image is stale (its baked runclave differs from this CLI). It exists to
+// turn the confusing "provision then fail" cases into a clear, up-front diagnosis.
+func cmdDoctor(args []string, stdout, stderr io.Writer) int {
+	allOK := true
+	say := func(ok bool, msg string) {
+		mark := "x"
+		if ok {
+			mark = "ok"
+		} else {
+			allOK = false
+		}
+		fmt.Fprintf(stdout, "  [%s] %s\n", mark, msg)
+	}
+	fmt.Fprintf(stdout, "runclave doctor (cli %s):\n", Version)
+
+	if !box.DaemonAvailable() {
+		say(false, "docker daemon reachable")
+		fmt.Fprintln(stdout, "\nstart Docker (or Colima) and re-run - nothing else can be checked without it.")
+		return 1
+	}
+	say(true, "docker daemon reachable")
+
+	anyMissing := false
+	for _, img := range []string{"runclave/base:latest", "runclave/gateway:latest"} {
+		present := imagePresent(img)
+		say(present, "image "+img)
+		anyMissing = anyMissing || !present
+	}
+	for _, agent := range policy.EmbeddedAgents() {
+		p, err := policy.Find("", agent)
+		if err != nil || p.Run.Image == "" {
+			continue
+		}
+		present := imagePresent(p.Run.Image)
+		say(present, "agent "+agent+" -> "+p.Run.Image)
+		if !present {
+			anyMissing = true
+			continue
+		}
+		if iv := imageRunclaveVersion(p.Run.Image); iv != "" && iv != Version {
+			fmt.Fprintf(stdout, "      note: %s ships runclave %s but this cli is %s; rebuild with `make images` (a stale binary may lack `probe`)\n", p.Run.Image, iv, Version)
+		}
+	}
+	if anyMissing {
+		fmt.Fprintln(stdout, "\nsome images are missing - build them with `make images`.")
+	}
+	if allOK {
+		fmt.Fprintln(stdout, "\nall good - `runclave .` is ready.")
+		return 0
+	}
+	return 1
 }
 
 // lsBox is one running runclave box for `runclave ls`.
