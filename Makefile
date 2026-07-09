@@ -1,4 +1,4 @@
-.PHONY: build test vet smoke images gateway-image base-image claude-image gemini-image codex-image copilot-image all-image
+.PHONY: build test vet smoke release images gateway-image base-image claude-image gemini-image codex-image copilot-image all-image
 
 # Version stamped into the binary. A tag if we're on one, else the short commit,
 # with -dirty when the tree has uncommitted changes; "dev" outside a git checkout.
@@ -48,3 +48,22 @@ all-image:
 # Real-path integration smoke test (needs `make images` + a docker daemon).
 smoke:
 	go test -tags integration -run TestIntegration -v ./internal/box/
+
+# Reproducible, versioned release binaries for the supported OS/arch, plus checksums.
+# Signing (cosign, keyless) and SBOM (syft) are printed as next steps: they need a
+# pushed tag and those tools, so the Makefile does not fake them.
+DIST ?= dist
+PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+
+release: test vet
+	rm -rf $(DIST) && mkdir -p $(DIST)
+	@for p in $(PLATFORMS); do \
+	  os=$${p%/*}; arch=$${p#*/}; \
+	  out=$(DIST)/runclave-$(VERSION)-$$os-$$arch; \
+	  echo "  building $$out"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="$(LDFLAGS)" -o $$out ./cmd/runclave || exit 1; \
+	done
+	@cd $(DIST) && (shasum -a 256 runclave-* 2>/dev/null || sha256sum runclave-*) > SHA256SUMS
+	@echo "release $(VERSION): $(DIST)/ (binaries + SHA256SUMS)"
+	@echo "  sign (keyless, needs cosign + a pushed tag):  cosign sign-blob --yes $(DIST)/SHA256SUMS > $(DIST)/SHA256SUMS.sig"
+	@echo "  SBOM (needs syft):                            syft dir:. -o spdx-json > $(DIST)/sbom.spdx.json"
