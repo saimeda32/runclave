@@ -45,6 +45,7 @@ Usage:
   runclave destroy <box>     tear down a box (prompts to save /out)
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
+  runclave version           print the build version
   runclave brokerd           host-side credential daemon: lends short-lived, repo-scoped git tokens to a box
   runclave credential <op>   in-box git credential helper (talks to the broker; not run by hand)
 
@@ -64,6 +65,10 @@ Flags:
                      trusted packs. A repo-local ./policies is NEVER auto-used (P5).
 `
 
+// Version is the build version, stamped via -ldflags "-X ...cli.Version=...".
+// Defaults to "dev" for a plain `go build`.
+var Version = "dev"
+
 // Run is the entry point; returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -76,6 +81,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
+		return 0
+	case "version", "--version", "-v":
+		fmt.Fprintf(stdout, "runclave %s\n", Version)
 		return 0
 	case "backends":
 		return cmdBackends(stdout, stderr)

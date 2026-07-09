@@ -1,7 +1,12 @@
 .PHONY: build test vet smoke images gateway-image base-image claude-image gemini-image codex-image copilot-image all-image
 
+# Version stamped into the binary. A tag if we're on one, else the short commit,
+# with -dirty when the tree has uncommitted changes; "dev" outside a git checkout.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -buildid= -X github.com/saimeda/runclave/internal/cli.Version=$(VERSION)
+
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" -o runclave ./cmd/runclave
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o runclave ./cmd/runclave
 
 test:
 	go test ./...
