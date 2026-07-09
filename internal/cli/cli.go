@@ -43,6 +43,7 @@ Usage:
   runclave policy <agent>    validate and print an agent policy pack
   runclave export <src> [dst] pull a named artifact out of the box (never automatic)
   runclave destroy <box>     tear down a box (prompts to save /out)
+  runclave ls                list running runclave boxes
   runclave open <box>        attach your editor (VS Code/Cursor) to a running box (the "code ." experience)
   runclave verify <receipt>  check a signed run receipt (.dsse.json) offline; fail-closed on tamper
   runclave version           print the build version
@@ -109,6 +110,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdProbe(rest, stdout, stderr)
 	case "open":
 		return cmdOpen(rest, stdout, stderr)
+	case "ls":
+		return cmdLs(rest, stdout, stderr)
 	case "export":
 		fmt.Fprintf(stderr, "runclave: %q not yet implemented\n", cmd)
 		return 1
@@ -229,6 +232,52 @@ func cmdOpen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "runclave open: launching %s failed: %v\n  open this URI manually: %s\n", binary, err, uri)
 		return 1
 	}
+	return 0
+}
+
+// lsBox is one running runclave box for `runclave ls`.
+type lsBox struct{ Name, Image, Age string }
+
+// parseLsBoxes turns `docker ps` tab-separated output (name\timage\tage per line)
+// into the workload boxes: names under the runclave- prefix, EXCLUDING the -gw
+// gateway sidecars, so the list shows the boxes a user acts on.
+func parseLsBoxes(dockerOut string) []lsBox {
+	var boxes []lsBox
+	for _, line := range strings.Split(strings.TrimRight(dockerOut, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) < 3 {
+			continue
+		}
+		name := f[0]
+		if !strings.HasPrefix(name, "runclave-") || strings.HasSuffix(name, "-gw") {
+			continue
+		}
+		boxes = append(boxes, lsBox{Name: name, Image: f[1], Age: f[2]})
+	}
+	return boxes
+}
+
+// cmdLs lists running runclave boxes (not the gateway sidecars), with hints.
+func cmdLs(args []string, stdout, stderr io.Writer) int {
+	out, err := exec.Command("docker", "ps", "--filter", "name=runclave-",
+		"--format", "{{.Names}}\t{{.Image}}\t{{.RunningFor}}").Output()
+	if err != nil {
+		fmt.Fprintf(stderr, "runclave ls: %v (is docker running?)\n", err)
+		return 1
+	}
+	boxes := parseLsBoxes(string(out))
+	if len(boxes) == 0 {
+		fmt.Fprintln(stdout, "no runclave boxes running (start one with `runclave .`)")
+		return 0
+	}
+	fmt.Fprintf(stdout, "%-30s %-28s %s\n", "BOX", "IMAGE (agent)", "AGE")
+	for _, b := range boxes {
+		fmt.Fprintf(stdout, "%-30s %-28s %s\n", b.Name, b.Image, b.Age)
+	}
+	fmt.Fprintln(stdout, "\nattach:  runclave open <box>     remove:  runclave destroy <box>")
 	return 0
 }
 

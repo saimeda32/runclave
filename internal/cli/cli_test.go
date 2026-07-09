@@ -211,6 +211,30 @@ func TestDefaultWorkspacePath(t *testing.T) {
 	}
 }
 
+// runclave ls lists workload boxes only: runclave- prefixed, excluding the -gw
+// gateway sidecars and any non-runclave container docker's substring filter caught.
+func TestParseLsBoxes(t *testing.T) {
+	out := "runclave-proj\trunclave/claude-code:latest\t2 minutes ago\n" +
+		"runclave-proj-gw\trunclave/gateway:latest\t2 minutes ago\n" +
+		"runclave-api\trunclave/codex:latest\tabout an hour ago\n" +
+		"myrunclave-thing\tsomeimage\t3 days ago\n"
+	boxes := parseLsBoxes(out)
+	if len(boxes) != 2 {
+		t.Fatalf("want 2 boxes (no gateways, no non-runclave), got %d: %+v", len(boxes), boxes)
+	}
+	if boxes[0].Name != "runclave-proj" || boxes[0].Image != "runclave/claude-code:latest" || boxes[0].Age != "2 minutes ago" {
+		t.Fatalf("first box parsed wrong: %+v", boxes[0])
+	}
+	if boxes[1].Name != "runclave-api" {
+		t.Fatalf("second box should be runclave-api, got %q", boxes[1].Name)
+	}
+	for _, b := range boxes {
+		if strings.HasSuffix(b.Name, "-gw") {
+			t.Fatalf("gateway sidecar must be excluded: %q", b.Name)
+		}
+	}
+}
+
 // The receipt's egress numbers come from counting the gateway's own decision log.
 func TestCountEgressLines(t *testing.T) {
 	log := "runclave proxy: default-deny CONNECT proxy on 0.0.0.0:8888 (2 domains allowed)\n" +
